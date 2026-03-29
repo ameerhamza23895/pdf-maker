@@ -21,10 +21,8 @@ type EditImagesContextType = {
   currentIndex: number;
   addImages: (uris: string[]) => void;
   setCurrentIndex: (index: number) => void;
-  updateImage: (
-    id: string,
-    patch: Partial<Omit<EditableImage, "id">>,
-  ) => void;
+  updateImage: (id: string, patch: Partial<Omit<EditableImage, "id">>) => void;
+  removeImage: (id: string) => void;
   clearImages: () => void;
 };
 
@@ -34,6 +32,7 @@ const defaultContext: EditImagesContextType = {
   addImages: () => undefined,
   setCurrentIndex: () => undefined,
   updateImage: () => undefined,
+  removeImage: () => undefined,
   clearImages: () => undefined,
 };
 
@@ -75,6 +74,20 @@ export function EditImagesProvider({
     );
   };
 
+  const removeImage = (id: string) => {
+    setImages((prev) => {
+      const next = prev.filter((image) => image.id !== id);
+      setCurrentIndex((current) => {
+        if (next.length === 0) return 0;
+        const removedIndex = prev.findIndex((image) => image.id === id);
+        if (removedIndex === -1) return current;
+        if (removedIndex < current) return current - 1;
+        return Math.min(current, next.length - 1);
+      });
+      return next;
+    });
+  };
+
   const clearImages = () => {
     setImages([]);
     setCurrentIndex(0);
@@ -86,6 +99,7 @@ export function EditImagesProvider({
     addImages,
     setCurrentIndex,
     updateImage,
+    removeImage,
     clearImages,
   };
 

@@ -1,6 +1,6 @@
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import * as ImageManipulator from "expo-image-manipulator";
-import { Link, useRouter } from "expo-router";
+import { useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
@@ -34,7 +34,7 @@ type HandleType =
 
 export default function EditImagesPage() {
   const router = useRouter();
-  const { images, currentIndex, setCurrentIndex, updateImage } =
+  const { images, currentIndex, setCurrentIndex, updateImage, removeImage } =
     useEditImages();
 
   const [mode, setMode] = useState<Mode>("crop");
@@ -44,6 +44,12 @@ export default function EditImagesPage() {
   const dragStartCrop = useRef({ top: 0, left: 0, right: 0, bottom: 0 });
 
   const currentImage = images[currentIndex];
+
+  useEffect(() => {
+    if (!currentImage) {
+      router.replace("/scan");
+    }
+  }, [currentImage, router]);
 
   useEffect(() => {
     if (currentImage?.uri) {
@@ -83,6 +89,47 @@ export default function EditImagesPage() {
       right: Math.max(c.right, offsetX),
     };
   }, [currentImage, offsetX, offsetY]);
+
+  useEffect(() => {
+    if (
+      mode !== "crop" ||
+      !currentImage ||
+      previewLayout.width === 0 ||
+      previewLayout.height === 0
+    ) {
+      return;
+    }
+
+    const currentCrop = currentImage.crop;
+    const isDefaultCrop =
+      currentCrop.top === 0 &&
+      currentCrop.left === 0 &&
+      currentCrop.right === 0 &&
+      currentCrop.bottom === 0;
+
+    if (!isDefaultCrop) {
+      return;
+    }
+
+    const side = Math.min(previewLayout.width, previewLayout.height) * 0.65;
+    const left = (previewLayout.width - side) / 2;
+    const top = (previewLayout.height - side) / 2;
+
+    updateImage(currentImage.id, {
+      crop: {
+        top,
+        left,
+        right: previewLayout.width - left - side,
+        bottom: previewLayout.height - top - side,
+      },
+    });
+  }, [
+    mode,
+    currentImage,
+    previewLayout.width,
+    previewLayout.height,
+    updateImage,
+  ]);
 
   const clamp = (value: number, min: number, max: number) =>
     Math.min(Math.max(value, min), max);
@@ -193,6 +240,11 @@ export default function EditImagesPage() {
     }
   };
 
+  const removeCurrentImage = () => {
+    if (!currentImage) return;
+    removeImage(currentImage.id);
+  };
+
   const rotateReal = async () => {
     if (!currentImage) return;
     try {
@@ -279,14 +331,7 @@ export default function EditImagesPage() {
   };
 
   if (!currentImage) {
-    return (
-      <View style={styles.emptyContainer}>
-        <Text style={styles.emptyText}>No images loaded yet.</Text>
-        <Link href="/" style={styles.linkButton}>
-          <Text style={styles.linkText}>Go back</Text>
-        </Link>
-      </View>
-    );
+    return null;
   }
 
   const getFilterStyle = (filter: string) => {
@@ -323,6 +368,13 @@ export default function EditImagesPage() {
 
         <View style={styles.previewCard} onLayout={onPreviewLayout}>
           <Image source={{ uri: currentImage.uri }} style={imageStyle} />
+          <TouchableOpacity
+            style={styles.removeButton}
+            onPress={removeCurrentImage}
+            accessibilityLabel="Remove current image"
+          >
+            <MaterialIcons name="close" size={18} color="white" />
+          </TouchableOpacity>
 
           {/* Masking out the cropped area for better UX */}
           {mode === "crop" && (
@@ -538,11 +590,13 @@ const styles = StyleSheet.create({
   thumbnailButtonActive: { borderColor: colors.primary },
   thumbnail: { width: 64, height: 64 },
   previewCard: {
-    backgroundColor: "#111111", // Darker background for contrast
+    backgroundColor: "#111111",
     borderRadius: radius.md,
-    height: 400, // Taller for better editing
+    height: 400,
     overflow: "hidden",
     position: "relative",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
   },
   image: { width: "100%", height: "100%", resizeMode: "contain" },
 
@@ -550,7 +604,8 @@ const styles = StyleSheet.create({
   cropFrame: {
     position: "absolute",
     borderWidth: 2,
-    borderColor: "white",
+    borderColor: "rgba(255,255,255,0.95)",
+    borderStyle: "dashed",
     backgroundColor: "rgba(255,255,255,0.12)",
     zIndex: 10,
     overflow: "visible",
@@ -588,7 +643,7 @@ const styles = StyleSheet.create({
   },
   edgeHandle: {
     position: "absolute",
-    backgroundColor: "rgba(255,255,255,0.35)",
+    backgroundColor: "rgba(255,255,255,0.45)",
     borderRadius: 15,
     zIndex: 11,
   },
@@ -655,6 +710,18 @@ const styles = StyleSheet.create({
   nextButtonText: { color: colors.onPrimary, fontWeight: "700" },
   emptyContainer: { flex: 1, alignItems: "center", justifyContent: "center" },
   emptyText: { color: colors.onSurface, marginBottom: spacing.md },
+  removeButton: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 12,
+  },
   linkButton: {
     padding: spacing.md,
     backgroundColor: colors.primary,
