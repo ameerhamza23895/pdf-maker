@@ -1016,6 +1016,45 @@ export function getOfficePreviewHtml(base64Data, options = {}) {
           case 'underline':
             execFormattingCommand('underline');
             break;
+          case 'strikethrough':
+            execFormattingCommand('strikeThrough');
+            break;
+          case 'subscript':
+            execFormattingCommand('subscript');
+            break;
+          case 'superscript':
+            execFormattingCommand('superscript');
+            break;
+          case 'justifyLeft':
+            execFormattingCommand('justifyLeft');
+            break;
+          case 'justifyCenter':
+            execFormattingCommand('justifyCenter');
+            break;
+          case 'justifyRight':
+            execFormattingCommand('justifyRight');
+            break;
+          case 'justifyFull':
+            execFormattingCommand('justifyFull');
+            break;
+          case 'insertUnorderedList':
+            execFormattingCommand('insertUnorderedList');
+            break;
+          case 'insertOrderedList':
+            execFormattingCommand('insertOrderedList');
+            break;
+          case 'indent':
+            execFormattingCommand('indent');
+            break;
+          case 'outdent':
+            execFormattingCommand('outdent');
+            break;
+          case 'removeFormat':
+            execFormattingCommand('removeFormat');
+            break;
+          case 'hiliteColor':
+            execFormattingCommand('hiliteColor', command.value || '#ffff00');
+            break;
           case 'setColor':
             execFormattingCommand('foreColor', command.value || '#000000');
             break;
@@ -1079,6 +1118,8 @@ export function getOfficePreviewHtml(base64Data, options = {}) {
       const html = buildPrintableHtml(command.title || sourceFileName);
       chunkAndSendHtml(requestId, html);
     }
+
+    window.dispatchViewerCommand = handleOfficePreviewCommand;
 
     function handleIncomingMessage(message) {
       try {

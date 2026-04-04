@@ -11,6 +11,14 @@ export function getPdfViewerHtml(base64Data, options = {}) {
     options.initialHighlightColor || '#FF000066'
   );
   const initialSelectedPage = Math.max(1, Number(options.initialSelectedPage) || 1);
+  const initialDrawBrushPx = Math.max(
+    1.5,
+    Math.min(28, Number(options.initialDrawBrushPx) || 5)
+  );
+  const initialMarkerBrushPx = Math.max(
+    6,
+    Math.min(40, Number(options.initialMarkerBrushPx) || 16)
+  );
 
   return `
 <!DOCTYPE html>
@@ -155,7 +163,8 @@ export function getPdfViewerHtml(base64Data, options = {}) {
   <script>
     let currentMode = ${initialMode};
     let drawColor = ${initialDrawColor};
-    let drawWidth = 3.5;
+    let drawWidth = ${initialDrawBrushPx};
+    let markerBrushPx = ${initialMarkerBrushPx};
     let highlightColor = ${initialHighlightColor};
     let annotations = normalizeAnnotations(${initialAnnotations});
     let pdfDoc = null;
@@ -220,8 +229,9 @@ export function getPdfViewerHtml(base64Data, options = {}) {
             ? pageAnnotations.drawings
                 .map((annotation) => ({
                   id: annotation.id || createAnnotationId('drawing'),
+                  kind: annotation.kind === 'marker' ? 'marker' : 'pen',
                   color: annotation.color || drawColor,
-                  width: clamp(safeNumber(annotation.width, 0.006), 0.001, 0.05),
+                  width: clamp(safeNumber(annotation.width, 0.006), 0.001, 0.09),
                   points: Array.isArray(annotation.points)
                     ? annotation.points.map(normalizePoint)
                     : [],
@@ -782,15 +792,20 @@ export function getPdfViewerHtml(base64Data, options = {}) {
 
       const points = stroke.points.map((point) => getCanvasPoint(point, pageNum));
       const baseLineWidth = Math.max(stroke.width * metric.drawCanvasWidth, 1.5);
+      const isMarker = stroke.kind === 'marker';
       const isSelected = !!(options && options.selected);
 
       ctx.save();
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
+      if (isMarker) {
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.globalAlpha = 0.5;
+      }
       ctx.strokeStyle = stroke.color;
       ctx.lineWidth = baseLineWidth;
 
-      if (isSelected) {
+      if (isSelected && !isMarker) {
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
         ctx.lineWidth = baseLineWidth + 8;
         strokePath(ctx, points);
@@ -807,6 +822,11 @@ export function getPdfViewerHtml(base64Data, options = {}) {
 
       strokePath(ctx, points);
       ctx.stroke();
+
+      if (isMarker) {
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+      }
 
       if (isSelected) {
         const bounds = getStrokeBounds(stroke.points, pageNum);
@@ -1140,7 +1160,7 @@ export function getPdfViewerHtml(base64Data, options = {}) {
       let previewStroke = null;
 
       function onDrawStart(event) {
-        if (currentMode !== 'draw') {
+        if (currentMode !== 'draw' && currentMode !== 'marker') {
           return;
         }
 
@@ -1149,18 +1169,33 @@ export function getPdfViewerHtml(base64Data, options = {}) {
 
         drawing = true;
         const bounds = canvas.getBoundingClientRect();
-        previewStroke = {
-          id: createAnnotationId('drawing'),
-          color: drawColor,
-          width: clamp(drawWidth / bounds.width, 0.001, 0.05),
-          points: [getNormalizedEventPoint(canvas, event)],
-        };
+        if (currentMode === 'marker') {
+          previewStroke = {
+            id: createAnnotationId('drawing'),
+            kind: 'marker',
+            color: highlightColor,
+            width: clamp(markerBrushPx / bounds.width, 0.002, 0.09),
+            points: [getNormalizedEventPoint(canvas, event)],
+          };
+        } else {
+          previewStroke = {
+            id: createAnnotationId('drawing'),
+            kind: 'pen',
+            color: drawColor,
+            width: clamp(drawWidth / bounds.width, 0.001, 0.05),
+            points: [getNormalizedEventPoint(canvas, event)],
+          };
+        }
 
         redrawDrawings(pageNum, previewStroke);
       }
 
       function onDrawMove(event) {
-        if (!drawing || currentMode !== 'draw' || !previewStroke) {
+        if (
+          !drawing ||
+          (currentMode !== 'draw' && currentMode !== 'marker') ||
+          !previewStroke
+        ) {
           return;
         }
 
@@ -1240,12 +1275,15 @@ export function getPdfViewerHtml(base64Data, options = {}) {
 
     function updateInteractionMode() {
       document.querySelectorAll('.annotation-layer').forEach((element) => {
-        element.classList.toggle('active', currentMode !== 'draw');
+        element.classList.toggle(
+          'active',
+          currentMode !== 'draw' && currentMode !== 'marker'
+        );
         element.classList.toggle('editing', currentMode === 'highlight' || currentMode === 'text');
       });
 
       document.querySelectorAll('.draw-canvas').forEach((element) => {
-        element.classList.toggle('active', currentMode === 'draw');
+        element.classList.toggle('active', currentMode === 'draw' || currentMode === 'marker');
       });
     }
 
@@ -1264,6 +1302,20 @@ export function getPdfViewerHtml(base64Data, options = {}) {
 
     function setHighlightColor(color) {
       highlightColor = color;
+    }
+
+    function setDrawBrushWidth(px) {
+      const next = Number(px);
+      if (Number.isFinite(next)) {
+        drawWidth = clamp(next, 1.5, 28);
+      }
+    }
+
+    function setMarkerBrushWidth(px) {
+      const next = Number(px);
+      if (Number.isFinite(next)) {
+        markerBrushPx = clamp(next, 6, 40);
+      }
     }
 
     function deleteSelectedAnnotation() {
@@ -1413,32 +1465,49 @@ export function getPdfViewerHtml(base64Data, options = {}) {
       }
     }
 
+    function dispatchViewerCommand(parsed) {
+      if (!parsed || typeof parsed.command !== 'string') {
+        return;
+      }
+      switch (parsed.command) {
+        case 'setMode':
+          setMode(parsed.mode);
+          break;
+        case 'setDrawColor':
+          setDrawColor(parsed.color);
+          break;
+        case 'setHighlightColor':
+          setHighlightColor(parsed.color);
+          break;
+        case 'setDrawBrushWidth':
+          setDrawBrushWidth(parsed.px);
+          break;
+        case 'setMarkerBrushWidth':
+          setMarkerBrushWidth(parsed.px);
+          break;
+        case 'addTextNote':
+          addTextNote(parsed.page, parsed.x, parsed.y, parsed.text);
+          break;
+        case 'clearPage':
+          clearAnnotations(parsed.page);
+          break;
+        case 'clearAll':
+          clearAllAnnotations();
+          break;
+        case 'deleteSelected':
+          deleteSelectedAnnotation();
+          break;
+        default:
+          break;
+      }
+    }
+
+    window.dispatchViewerCommand = dispatchViewerCommand;
+
     function handleIncomingMessage(message) {
       try {
         const parsed = JSON.parse(message);
-        switch (parsed.command) {
-          case 'setMode':
-            setMode(parsed.mode);
-            break;
-          case 'setDrawColor':
-            setDrawColor(parsed.color);
-            break;
-          case 'setHighlightColor':
-            setHighlightColor(parsed.color);
-            break;
-          case 'addTextNote':
-            addTextNote(parsed.page, parsed.x, parsed.y, parsed.text);
-            break;
-          case 'clearPage':
-            clearAnnotations(parsed.page);
-            break;
-          case 'clearAll':
-            clearAllAnnotations();
-            break;
-          case 'deleteSelected':
-            deleteSelectedAnnotation();
-            break;
-        }
+        dispatchViewerCommand(parsed);
       } catch (_) {}
     }
 

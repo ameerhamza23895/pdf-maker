@@ -1,12 +1,15 @@
 // @ts-nocheck
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { electricCuratorTheme, withAlpha } from '@/src/theme/electric-curator';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   ActivityIndicator,
   Alert,
   Modal,
+  PanResponder,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -15,6 +18,7 @@ import {
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as DocumentPicker from 'expo-document-picker';
 import { File, Paths } from 'expo-file-system';
 import * as LegacyFileSystem from 'expo-file-system/legacy';
@@ -54,10 +58,36 @@ const ui = {
 };
 
 const TOOLS = [
-  { id: 'view', label: 'Select' },
-  { id: 'highlight', label: 'Highlight' },
-  { id: 'draw', label: 'Draw' },
-  { id: 'text', label: 'Note' },
+  {
+    id: 'view',
+    label: 'Select',
+    icon: 'touch-app',
+    hint: 'Select and move annotations',
+  },
+  {
+    id: 'highlight',
+    label: 'Area highlight',
+    icon: 'highlight-alt',
+    hint: 'Drag a rectangle over text',
+  },
+  {
+    id: 'marker',
+    label: 'Highlighter',
+    icon: 'format-color-fill',
+    hint: 'Freehand translucent highlighter strokes',
+  },
+  {
+    id: 'draw',
+    label: 'Pen',
+    icon: 'brush',
+    hint: 'Solid pen strokes — adjust brush size below',
+  },
+  {
+    id: 'text',
+    label: 'Note',
+    icon: 'sticky-note-2',
+    hint: 'Add sticky note',
+  },
 ];
 
 const COLORS = [
@@ -66,6 +96,18 @@ const COLORS = [
   { name: 'Green', value: '#4CAF50' },
   { name: 'Orange', value: '#FF9800' },
   { name: 'Purple', value: '#9C27B0' },
+];
+
+/** Mini gradient strips — tap uses the left (primary) stop as the solid color. */
+const GRADIENT_COLOR_PRESETS = [
+  { id: 'dawn', colors: ['#FF9A9E', '#FECFEF'], label: 'Dawn' },
+  { id: 'sunset', colors: ['#FF512F', '#F09819'], label: 'Sunset' },
+  { id: 'ocean', colors: ['#2193B0', '#6DD5ED'], label: 'Ocean' },
+  { id: 'lavender', colors: ['#834D9B', '#D04ED6'], label: 'Lilac' },
+  { id: 'mint', colors: ['#00B09B', '#96C93D'], label: 'Mint' },
+  { id: 'royal', colors: ['#141E30', '#243B55'], label: 'Royal' },
+  { id: 'peach', colors: ['#FFECD2', '#FCB69F'], label: 'Peach' },
+  { id: 'ember', colors: ['#F12711', '#F5AF19'], label: 'Ember' },
 ];
 
 const DEFAULT_COLOR = COLORS[0].value;
@@ -108,10 +150,14 @@ const PDF_CONVERSION_FORMATS = [
   },
 ];
 const OFFICE_FONT_FAMILY_OPTIONS = [
-  { label: 'Sans', value: 'Arial' },
-  { label: 'Serif', value: 'Georgia' },
-  { label: 'Mono', value: 'Courier New' },
+  { label: 'Arial', value: 'Arial' },
+  { label: 'Georgia', value: 'Georgia' },
+  { label: 'Times', value: 'Times New Roman' },
+  { label: 'Verdana', value: 'Verdana' },
+  { label: 'Courier', value: 'Courier New' },
+  { label: 'Tahoma', value: 'Tahoma' },
 ];
+const OFFICE_HIGHLIGHT_COLOR = '#FFF59D';
 const OFFICE_FONT_SIZE_OPTIONS = [
   { label: 'A-', action: 'adjustFontSize', value: -2 },
   { label: 'A', action: 'resetFontSize', value: 16 },
@@ -120,6 +166,108 @@ const OFFICE_FONT_SIZE_OPTIONS = [
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+/** @returns {{ r: number, g: number, b: number } | null} */
+function parseHexStringToRgb(input) {
+  if (!input || typeof input !== 'string') {
+    return null;
+  }
+  let s = input.trim();
+  if (s.startsWith('#')) {
+    s = s.slice(1);
+  }
+  if (s.length === 3) {
+    s = s
+      .split('')
+      .map((c) => c + c)
+      .join('');
+  }
+  if (!/^[0-9a-fA-F]{6}$/.test(s)) {
+    return null;
+  }
+  return {
+    r: parseInt(s.slice(0, 2), 16),
+    g: parseInt(s.slice(2, 4), 16),
+    b: parseInt(s.slice(4, 6), 16),
+  };
+}
+
+function rgbToHex(r, g, b) {
+  const c = (n) => clamp(Math.round(Number(n)), 0, 255);
+  return (
+    '#' +
+    [c(r), c(g), c(b)]
+      .map((x) => x.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase()
+  );
+}
+
+function rgbToHsv(r, g, b) {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === rn) {
+      h = ((gn - bn) / d + (gn < bn ? 6 : 0)) / 6;
+    } else if (max === gn) {
+      h = ((bn - rn) / d + 2) / 6;
+    } else {
+      h = ((rn - gn) / d + 4) / 6;
+    }
+  }
+  h *= 360;
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+  return { h, s, v };
+}
+
+function hsvToRgb(h, s, v) {
+  const hh = ((h % 360) + 360) % 360;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((hh / 60) % 2) - 1));
+  const m = v - c;
+  let rp = 0;
+  let gp = 0;
+  let bp = 0;
+  if (hh < 60) {
+    rp = c;
+    gp = x;
+  } else if (hh < 120) {
+    rp = x;
+    gp = c;
+  } else if (hh < 180) {
+    gp = c;
+    bp = x;
+  } else if (hh < 240) {
+    gp = x;
+    bp = c;
+  } else if (hh < 300) {
+    rp = x;
+    bp = c;
+  } else {
+    rp = c;
+    bp = x;
+  }
+  return {
+    r: Math.round((rp + m) * 255),
+    g: Math.round((gp + m) * 255),
+    b: Math.round((bp + m) * 255),
+  };
+}
+
+function colorMatchesPreset(hex, presetList = COLORS) {
+  const p = parseHexStringToRgb(hex);
+  if (!p) {
+    return false;
+  }
+  const h = rgbToHex(p.r, p.g, p.b);
+  return presetList.some((c) => c.value.toUpperCase() === h.toUpperCase());
 }
 
 function createEmptyPageAnnotations() {
@@ -405,9 +553,10 @@ async function bakePdfWithAnnotations(base64Contents, annotationState) {
         return;
       }
 
-      const { color, opacity } = parseHexColor(drawing.color, 1);
+      const isMarker = drawing.kind === 'marker';
+      const { color, opacity } = parseHexColor(drawing.color, isMarker ? 0.45 : 1);
       const thickness = Math.max(
-        clamp(Number(drawing.width) || 0.006, 0.001, 0.05) * width,
+        clamp(Number(drawing.width) || 0.006, 0.001, 0.09) * width,
         1.2
       );
 
@@ -418,6 +567,7 @@ async function bakePdfWithAnnotations(base64Contents, annotationState) {
           size: Math.max(thickness / 2, 0.8),
           color,
           opacity,
+          blendMode: isMarker ? BlendMode.Multiply : undefined,
         });
         return;
       }
@@ -430,6 +580,7 @@ async function bakePdfWithAnnotations(base64Contents, annotationState) {
           color,
           opacity,
           lineCap: LineCapStyle.Round,
+          blendMode: isMarker ? BlendMode.Multiply : undefined,
         });
       }
     });
@@ -554,6 +705,411 @@ async function savePdfToAndroidDeviceFolder(base64Contents, fileName) {
   );
 }
 
+function BrushWidthTrack({
+  min,
+  max,
+  value,
+  onChange,
+  accessibilityLabel,
+  trackStyle,
+  fillStyle,
+  integerStep = false,
+}) {
+  const widthRef = useRef(1);
+  const applyLocationX = useCallback(
+    (x) => {
+      const w = widthRef.current;
+      const ratio = Math.max(0, Math.min(1, x / w));
+      const raw = min + ratio * (max - min);
+      const stepped = integerStep
+        ? Math.round(raw)
+        : Math.round(raw * 2) / 2;
+      onChange(Math.max(min, Math.min(max, stepped)));
+    },
+    [min, max, onChange, integerStep]
+  );
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: (e) => {
+          applyLocationX(e.nativeEvent.locationX);
+        },
+        onPanResponderMove: (e) => {
+          applyLocationX(e.nativeEvent.locationX);
+        },
+      }),
+    [applyLocationX]
+  );
+
+  return (
+    <View
+      style={trackStyle}
+      onLayout={(e) => {
+        widthRef.current = e.nativeEvent.layout.width || 1;
+      }}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole="adjustable"
+      {...panResponder.panHandlers}
+    >
+      <View
+        style={[
+          fillStyle,
+          {
+            width: `${((value - min) / (max - min)) * 100}%`,
+          },
+        ]}
+      />
+    </View>
+  );
+}
+
+const HUE_STRIP_GRADIENT = [
+  '#FF0000',
+  '#FFFF00',
+  '#00FF00',
+  '#00FFFF',
+  '#0000FF',
+  '#FF00FF',
+  '#FF0000',
+];
+
+function CustomColorModal({ visible, seedHex, title, onApply, onClose }) {
+  const [hsv, setHsv] = useState({ h: 0, s: 1, v: 1 });
+  const [hexInput, setHexInput] = useState('#FF0000');
+  const [showRgbAdvanced, setShowRgbAdvanced] = useState(false);
+  const [svLayout, setSvLayout] = useState({ w: 280, h: 200 });
+  const [hueLayout, setHueLayout] = useState({ w: 280 });
+  const svBoxRef = useRef({ w: 280, h: 200 });
+  const hueBarRef = useRef({ w: 280 });
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    const p = parseHexStringToRgb(seedHex) || { r: 255, g: 0, b: 0 };
+    const nextHsv = rgbToHsv(p.r, p.g, p.b);
+    setHsv(nextHsv);
+    setHexInput(rgbToHex(p.r, p.g, p.b));
+  }, [visible, seedHex]);
+
+  const rgb = hsvToRgb(hsv.h, hsv.s, hsv.v);
+  const previewHex = rgbToHex(rgb.r, rgb.g, rgb.b);
+  const pureHueRgb = hsvToRgb(hsv.h, 1, 1);
+  const pureHueHex = rgbToHex(pureHueRgb.r, pureHueRgb.g, pureHueRgb.b);
+
+  const applySvFromLocal = useCallback((x, y) => {
+    const { w, h } = svBoxRef.current;
+    const sx = clamp(x, 0, w);
+    const sy = clamp(y, 0, h);
+    const s = sx / w;
+    const v = 1 - sy / h;
+    setHsv((prev) => {
+      const next = { ...prev, s, v };
+      const r = hsvToRgb(next.h, next.s, next.v);
+      setHexInput(rgbToHex(r.r, r.g, r.b));
+      return next;
+    });
+  }, []);
+
+  const applyHueFromLocal = useCallback((x) => {
+    const w = hueBarRef.current.w;
+    const hx = clamp(x, 0, w);
+    const hDeg = (hx / w) * 360;
+    setHsv((prev) => {
+      const next = { ...prev, h: hDeg };
+      const r = hsvToRgb(next.h, next.s, next.v);
+      setHexInput(rgbToHex(r.r, r.g, r.b));
+      return next;
+    });
+  }, []);
+
+  const svPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: (e) => {
+          applySvFromLocal(e.nativeEvent.locationX, e.nativeEvent.locationY);
+        },
+        onPanResponderMove: (e) => {
+          applySvFromLocal(e.nativeEvent.locationX, e.nativeEvent.locationY);
+        },
+      }),
+    [applySvFromLocal]
+  );
+
+  const huePan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: (e) => {
+          applyHueFromLocal(e.nativeEvent.locationX);
+        },
+        onPanResponderMove: (e) => {
+          applyHueFromLocal(e.nativeEvent.locationX);
+        },
+      }),
+    [applyHueFromLocal]
+  );
+
+  const onHexInputChange = useCallback((text) => {
+    setHexInput(text);
+    const p = parseHexStringToRgb(text);
+    if (p) {
+      setHsv(rgbToHsv(p.r, p.g, p.b));
+    }
+  }, []);
+
+  const setChannel = useCallback((channel, v) => {
+    setHsv((prev) => {
+      const r0 = hsvToRgb(prev.h, prev.s, prev.v);
+      const nextRgb = { ...r0, [channel]: v };
+      const nextHsv = rgbToHsv(nextRgb.r, nextRgb.g, nextRgb.b);
+      setHexInput(rgbToHex(nextRgb.r, nextRgb.g, nextRgb.b));
+      return nextHsv;
+    });
+  }, []);
+
+  const applyGradientPreset = useCallback((hex) => {
+    const p = parseHexStringToRgb(hex);
+    if (!p) {
+      return;
+    }
+    const nextHsv = rgbToHsv(p.r, p.g, p.b);
+    setHsv(nextHsv);
+    setHexInput(rgbToHex(p.r, p.g, p.b));
+  }, []);
+
+  const handleApply = useCallback(() => {
+    const p = parseHexStringToRgb(hexInput);
+    const final = p ? rgbToHex(p.r, p.g, p.b) : previewHex;
+    onApply(final);
+  }, [hexInput, previewHex, onApply]);
+
+  const svW = svLayout.w || 1;
+  const svH = svLayout.h || 1;
+  const hueW = hueLayout.w || 1;
+  const svThumbLeft = hsv.s * svW - 11;
+  const svThumbTop = (1 - hsv.v) * svH - 11;
+  const hueThumbLeft = (hsv.h / 360) * hueW;
+  const hueThumbW = 5;
+
+  return (
+    <Modal
+      visible={visible}
+      transparent={true}
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalContent, styles.customColorModalContent]}>
+          <View style={styles.customColorHeader}>
+            <Text style={styles.customColorHeaderTitle} numberOfLines={1}>
+              {title}
+            </Text>
+            <TouchableOpacity
+              onPress={onClose}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              accessibilityLabel="Close"
+            >
+              <MaterialIcons name="close" size={22} color={colors.onSurface} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={styles.customColorScroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <Text style={styles.customColorHint}>
+              Drag the square and hue bar (like Google&apos;s picker), choose a gradient
+              swatch, or type hex below.
+            </Text>
+
+            <View style={styles.customColorPreviewRow}>
+              <View
+                style={[styles.customColorPreviewCircle, { backgroundColor: previewHex }]}
+              />
+              <View style={styles.customColorPreviewMeta}>
+                <Text style={styles.customColorPreviewLabel}>Selected</Text>
+                <Text style={styles.customColorPreviewHex}>{previewHex}</Text>
+              </View>
+            </View>
+
+            <Text style={styles.customColorSectionLabel}>Spectrum</Text>
+            <View style={styles.spectrumPadOuter}>
+              <View
+                style={styles.spectrumPad}
+                onLayout={(e) => {
+                  const { width, height } = e.nativeEvent.layout;
+                  const w = width || 1;
+                  const h = height || 1;
+                  svBoxRef.current = { w, h };
+                  setSvLayout({ w, h });
+                }}
+                {...svPan.panHandlers}
+              >
+                <LinearGradient
+                  style={StyleSheet.absoluteFill}
+                  colors={['#FFFFFF', pureHueHex]}
+                  start={{ x: 0, y: 0.5 }}
+                  end={{ x: 1, y: 0.5 }}
+                />
+                <LinearGradient
+                  style={StyleSheet.absoluteFill}
+                  colors={['rgba(255,255,255,0)', '#000000']}
+                  start={{ x: 0.5, y: 0 }}
+                  end={{ x: 0.5, y: 1 }}
+                />
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.svThumb,
+                    {
+                      left: clamp(svThumbLeft, -2, svW - 20),
+                      top: clamp(svThumbTop, -2, svH - 20),
+                    },
+                  ]}
+                />
+              </View>
+            </View>
+
+            <Text style={styles.customColorSectionLabel}>Hue</Text>
+            <View
+              style={styles.hueStripOuter}
+              onLayout={(e) => {
+                const w = e.nativeEvent.layout.width || 1;
+                hueBarRef.current = { w };
+                setHueLayout({ w });
+              }}
+            >
+              <LinearGradient
+                style={styles.hueStripGradient}
+                colors={HUE_STRIP_GRADIENT}
+                start={{ x: 0, y: 0.5 }}
+                end={{ x: 1, y: 0.5 }}
+              />
+              <View style={styles.hueStripOverlay} {...huePan.panHandlers} />
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.hueThumb,
+                  {
+                    left: clamp(
+                      hueThumbLeft - hueThumbW / 2,
+                      0,
+                      Math.max(0, hueW - hueThumbW)
+                    ),
+                  },
+                ]}
+              />
+            </View>
+
+            <Text style={styles.customColorSectionLabel}>Gradient looks</Text>
+            <Text style={styles.customColorGradientHint}>
+              Tap a strip — uses the left color (solid for pen, text, and highlights).
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.gradientPresetsScroll}
+            >
+              {GRADIENT_COLOR_PRESETS.map((preset) => (
+                <TouchableOpacity
+                  key={preset.id}
+                  style={styles.gradientPresetChip}
+                  onPress={() => applyGradientPreset(preset.colors[0])}
+                  accessibilityLabel={`Gradient ${preset.label}, primary ${preset.colors[0]}`}
+                >
+                  <LinearGradient
+                    colors={preset.colors}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
+                    style={styles.gradientPresetFill}
+                  />
+                  <Text style={styles.gradientPresetLabel}>{preset.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <Text style={styles.customColorSectionLabel}>Hex</Text>
+            <TextInput
+              style={styles.customColorHexInput}
+              value={hexInput}
+              onChangeText={onHexInputChange}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="#RRGGBB"
+              placeholderTextColor={withAlpha(colors.onSurface, 0.45)}
+            />
+
+            <TouchableOpacity
+              style={styles.customColorAdvancedToggle}
+              onPress={() => setShowRgbAdvanced((v) => !v)}
+              accessibilityLabel={showRgbAdvanced ? 'Hide RGB sliders' : 'Show RGB sliders'}
+            >
+              <MaterialIcons
+                name="tune"
+                size={20}
+                color={colors.primaryDim}
+              />
+              <Text style={styles.customColorAdvancedToggleText}>
+                {showRgbAdvanced ? 'Hide RGB sliders' : 'RGB sliders (advanced)'}
+              </Text>
+              <MaterialIcons
+                name={showRgbAdvanced ? 'expand-less' : 'expand-more'}
+                size={22}
+                color={withAlpha(colors.onSurface, 0.6)}
+              />
+            </TouchableOpacity>
+
+            {showRgbAdvanced && (
+              <>
+                {[
+                  { key: 'r', label: 'Red' },
+                  { key: 'g', label: 'Green' },
+                  { key: 'b', label: 'Blue' },
+                ].map(({ key, label }) => (
+                  <View key={key} style={styles.customColorRgbRow}>
+                    <Text style={styles.customColorChannelLabel}>{label}</Text>
+                    <BrushWidthTrack
+                      min={0}
+                      max={255}
+                      value={rgb[key]}
+                      integerStep={true}
+                      onChange={(v) => setChannel(key, v)}
+                      accessibilityLabel={`${label}`}
+                      trackStyle={styles.customColorTrack}
+                      fillStyle={styles.brushTrackFill}
+                    />
+                    <Text style={styles.customColorChannelValue}>{rgb[key]}</Text>
+                  </View>
+                ))}
+              </>
+            )}
+          </ScrollView>
+
+          <View style={styles.modalButtons}>
+            <TouchableOpacity style={styles.modalBtnCancel} onPress={onClose}>
+              <Text style={styles.modalBtnCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.modalBtnSubmit} onPress={handleApply}>
+              <Text style={styles.modalBtnSubmitText}>Apply</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 export default function EditPdfPage() {
   const [documentUri, setDocumentUri] = useState(null);
   const [documentName, setDocumentName] = useState('');
@@ -585,6 +1141,17 @@ export default function EditPdfPage() {
   const [pageNumberInput, setPageNumberInput] = useState('1');
   const [pageEditorBusy, setPageEditorBusy] = useState(false);
   const [viewerInstanceId, setViewerInstanceId] = useState(0);
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [customColorModalVisible, setCustomColorModalVisible] = useState(false);
+  const [customColorModalTitle, setCustomColorModalTitle] =
+    useState('Annotation color');
+  const customColorTargetRef = useRef('pdf');
+  const [showPdfOverflowMenu, setShowPdfOverflowMenu] = useState(false);
+  const [drawBrushPx, setDrawBrushPx] = useState(6);
+  const [markerBrushPx, setMarkerBrushPx] = useState(16);
+
+  const insets = useSafeAreaInsets();
 
   const webViewRef = useRef(null);
   const conversionChunksRef = useRef({
@@ -849,6 +1416,28 @@ export default function EditPdfPage() {
     setOfficePdfBusy(false);
   }, []);
 
+  const openRenameModal = useCallback(() => {
+    if (!documentUri) {
+      return;
+    }
+    setRenameDraft(documentName);
+    setShowRenameModal(true);
+  }, [documentName, documentUri]);
+
+  const applyDocumentRename = useCallback(() => {
+    const trimmed = renameDraft.trim();
+    if (!trimmed) {
+      Alert.alert('Name required', 'Enter a file name.');
+      return;
+    }
+    let next = trimmed;
+    if (documentType && !trimmed.includes('.')) {
+      next = `${trimmed}.${documentType}`;
+    }
+    setDocumentName(next);
+    setShowRenameModal(false);
+  }, [renameDraft, documentType]);
+
   const persistAnnotationState = useCallback(
     (nextDocumentKey, nextAnnotations) => {
       if (!nextDocumentKey) {
@@ -904,7 +1493,9 @@ export default function EditPdfPage() {
       setAnnotationState(nextAnnotations);
       setSelectedAnnotation(null);
       setActiveTool(nextMode);
-      setShowColorPicker(nextMode === 'draw' || nextMode === 'highlight');
+      setShowColorPicker(
+        nextMode === 'draw' || nextMode === 'highlight' || nextMode === 'marker'
+      );
       setTotalPages(nextPageCount);
       setPageNumberInput(String(safeSelectedPage));
       setViewerHtml(
@@ -923,39 +1514,9 @@ export default function EditPdfPage() {
     const js = `
       (function() {
         try {
-          var message = ${JSON.stringify(JSON.stringify(command))};
-          var parsed = JSON.parse(message);
-          switch (parsed.command) {
-            case 'setMode':
-              typeof setMode === 'function' && setMode(parsed.mode);
-              break;
-            case 'setDrawColor':
-              typeof setDrawColor === 'function' && setDrawColor(parsed.color);
-              break;
-            case 'setHighlightColor':
-              typeof setHighlightColor === 'function' && setHighlightColor(parsed.color);
-              break;
-            case 'addTextNote':
-              typeof addTextNote === 'function' &&
-                addTextNote(parsed.page, parsed.x, parsed.y, parsed.text);
-              break;
-            case 'clearPage':
-              typeof clearAnnotations === 'function' && clearAnnotations(parsed.page);
-              break;
-            case 'clearAll':
-              typeof clearAllAnnotations === 'function' && clearAllAnnotations();
-              break;
-            case 'deleteSelected':
-              typeof deleteSelectedAnnotation === 'function' && deleteSelectedAnnotation();
-              break;
-            case 'exportPreview':
-              typeof handleOfficePreviewCommand === 'function' &&
-                handleOfficePreviewCommand(parsed);
-              break;
-            case 'officeFormat':
-              typeof handleOfficePreviewCommand === 'function' &&
-                handleOfficePreviewCommand(parsed);
-              break;
+          var cmd = ${JSON.stringify(command)};
+          if (typeof window.dispatchViewerCommand === 'function') {
+            window.dispatchViewerCommand(cmd);
           }
         } catch (error) {
           console.error('Command error:', error);
@@ -1096,8 +1657,13 @@ export default function EditPdfPage() {
     }
 
     try {
-      const extension = documentName.split('.').pop();
-      const baseName = documentName.replace('.' + extension, '');
+      const hasDot = documentName.includes('.');
+      const extension = hasDot
+        ? documentName.split('.').pop()
+        : documentType;
+      const baseName = hasDot
+        ? documentName.slice(0, documentName.length - extension.length - 1)
+        : documentName;
       const newName = `${baseName}_copy.${extension}`;
       const nextUri = Paths.document.uri + newName;
 
@@ -1185,13 +1751,27 @@ export default function EditPdfPage() {
 
   const applyOfficeTextColor = useCallback(
     (color) => {
-      setActiveColor(color);
+      const parsed = parseHexStringToRgb(color);
+      const normalized = parsed ? rgbToHex(parsed.r, parsed.g, parsed.b) : String(color);
+      setActiveColor(normalized);
       sendOfficePreviewCommand({
         action: 'setColor',
-        value: color,
+        value: normalized,
       });
     },
     [sendOfficePreviewCommand]
+  );
+
+  const handleCustomColorApply = useCallback(
+    (hex) => {
+      if (customColorTargetRef.current === 'office') {
+        applyOfficeTextColor(hex);
+      } else {
+        selectColor(hex);
+      }
+      setCustomColorModalVisible(false);
+    },
+    [applyOfficeTextColor, selectColor]
   );
 
   const insertImageIntoOfficePreview = useCallback(async () => {
@@ -1419,7 +1999,9 @@ export default function EditPdfPage() {
     (toolId) => {
       setActiveTool(toolId);
       setSelectedAnnotation(null);
-      setShowColorPicker(toolId === 'draw' || toolId === 'highlight');
+      setShowColorPicker(
+        toolId === 'draw' || toolId === 'highlight' || toolId === 'marker'
+      );
       sendCommand({ command: 'setMode', mode: toolId });
     },
     [sendCommand]
@@ -1427,18 +2009,27 @@ export default function EditPdfPage() {
 
   const selectColor = useCallback(
     (color) => {
-      setActiveColor(color);
-      if (activeTool === 'draw') {
-        sendCommand({ command: 'setDrawColor', color });
-      } else if (activeTool === 'highlight') {
-        sendCommand({
-          command: 'setHighlightColor',
-          color: color + HIGHLIGHT_ALPHA_HEX,
-        });
-      }
+      const parsed = parseHexStringToRgb(color);
+      const normalized = parsed ? rgbToHex(parsed.r, parsed.g, parsed.b) : String(color);
+      setActiveColor(normalized);
+      // Always sync both to the WebView so pen, area highlight, and marker stay in
+      // sync (injected scripts call window.dispatchViewerCommand, not page globals).
+      sendCommand({ command: 'setDrawColor', color: normalized });
+      sendCommand({
+        command: 'setHighlightColor',
+        color: normalized + HIGHLIGHT_ALPHA_HEX,
+      });
     },
-    [activeTool, sendCommand]
+    [sendCommand]
   );
+
+  const openCustomColorModal = useCallback((target) => {
+    customColorTargetRef.current = target;
+    setCustomColorModalTitle(
+      target === 'office' ? 'Text & highlight color' : 'Annotation color'
+    );
+    setCustomColorModalVisible(true);
+  }, []);
 
   const deleteSelectedAnnotation = useCallback(() => {
     if (!selectedAnnotation) {
@@ -1731,6 +2322,8 @@ export default function EditPdfPage() {
               command: 'setHighlightColor',
               color: activeColor + HIGHLIGHT_ALPHA_HEX,
             });
+            sendCommand({ command: 'setDrawBrushWidth', px: drawBrushPx });
+            sendCommand({ command: 'setMarkerBrushWidth', px: markerBrushPx });
             break;
           case 'requestTextInput':
             setTextNoteModal({ page: data.page, x: data.x, y: data.y });
@@ -1861,11 +2454,27 @@ export default function EditPdfPage() {
       activeColor,
       activeTool,
       documentKey,
+      drawBrushPx,
+      markerBrushPx,
       finalizeOfficePreviewPdfExport,
       persistAnnotationState,
       sendCommand,
     ]
   );
+
+  useEffect(() => {
+    if (documentType !== 'pdf') {
+      return;
+    }
+    sendCommand({ command: 'setDrawBrushWidth', px: drawBrushPx });
+  }, [documentType, drawBrushPx, sendCommand]);
+
+  useEffect(() => {
+    if (documentType !== 'pdf') {
+      return;
+    }
+    sendCommand({ command: 'setMarkerBrushWidth', px: markerBrushPx });
+  }, [documentType, markerBrushPx, sendCommand]);
 
   const submitTextNote = useCallback(() => {
     if (textNoteModal && noteText.trim()) {
@@ -1936,11 +2545,41 @@ export default function EditPdfPage() {
     <View style={styles.container}>
       <StatusBar style="dark" backgroundColor={colors.surface} />
 
-      <View style={styles.header}>
-        <Text style={styles.headerTitle} numberOfLines={1}>
-          {documentName || 'Electric PDF Studio'}
-        </Text>
-        {totalPages > 0 && <Text style={styles.pageCount}>{totalPages} pages</Text>}
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(
+              insets.top,
+              Platform.OS === 'android' ? 12 : 10,
+            ),
+          },
+        ]}
+      >
+        <TouchableOpacity
+          style={styles.headerTitleBlock}
+          onPress={openRenameModal}
+          disabled={!documentUri}
+          activeOpacity={documentUri ? 0.65 : 1}
+        >
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {documentName || 'Electric PDF Studio'}
+          </Text>
+          {documentUri ? (
+            <MaterialIcons
+              name="edit"
+              size={18}
+              color={colors.primary}
+              style={styles.headerEditIcon}
+            />
+          ) : null}
+        </TouchableOpacity>
+        {totalPages > 0 ? (
+          <View style={styles.pageCountPill}>
+            <Text style={styles.pageCountLabel}>{totalPages}</Text>
+            <Text style={styles.pageCountSuffix}>pages</Text>
+          </View>
+        ) : null}
       </View>
 
       {!documentUri && !loading && (
@@ -1978,97 +2617,127 @@ export default function EditPdfPage() {
       {documentUri && !loading && (
         <View style={styles.documentArea}>
           <View style={styles.actionBar}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <TouchableOpacity style={styles.actionBtn} onPress={pickDocument}>
-                <Text style={styles.actionBtnText}>Open</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.actionBarScroll}
+            >
+              <TouchableOpacity
+                style={styles.actionIconBtn}
+                onPress={pickDocument}
+                accessibilityLabel="Open document"
+              >
+                <MaterialIcons name="folder-open" size={22} color={colors.primary} />
               </TouchableOpacity>
-              <TouchableOpacity style={styles.actionBtn} onPress={copyDocument}>
-                <Text style={styles.actionBtnText}>Copy</Text>
+              <TouchableOpacity
+                style={styles.actionIconBtn}
+                onPress={copyDocument}
+                accessibilityLabel="Copy document"
+              >
+                <MaterialIcons name="content-copy" size={22} color={colors.onSurface} />
               </TouchableOpacity>
-              <TouchableOpacity style={styles.actionBtn} onPress={shareDocument}>
-                <Text style={styles.actionBtnText}>Share</Text>
+              <TouchableOpacity
+                style={styles.actionIconBtn}
+                onPress={shareDocument}
+                accessibilityLabel="Share document"
+              >
+                <MaterialIcons name="share" size={22} color={colors.onSurface} />
               </TouchableOpacity>
               {documentType === 'pdf' && (
                 <>
+                  <View style={styles.actionBarDivider} />
                   <TouchableOpacity
                     style={[
-                      styles.actionBtn,
-                      !!conversionTask && styles.actionBtnDisabled,
+                      styles.actionIconBtn,
+                      !!conversionTask && styles.actionIconBtnDisabled,
                     ]}
                     disabled={!!conversionTask}
                     onPress={() => setShowConvertModal(true)}
+                    accessibilityLabel="Convert PDF"
                   >
-                    <Text style={styles.actionBtnText}>
-                      {conversionTask ? 'Converting…' : 'Convert'}
-                    </Text>
+                    <MaterialIcons
+                      name="transform"
+                      size={22}
+                      color={colors.onSurface}
+                    />
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[
-                      styles.actionBtn,
-                      pageEditorBusy && styles.actionBtnDisabled,
+                      styles.actionIconBtn,
+                      pageEditorBusy && styles.actionIconBtnDisabled,
                     ]}
                     disabled={pageEditorBusy}
                     onPress={() => setShowPageEditorModal(true)}
+                    accessibilityLabel="Edit pages"
                   >
-                    <Text style={styles.actionBtnText}>Pages</Text>
+                    <MaterialIcons name="layers" size={22} color={colors.onSurface} />
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[
-                      styles.actionBtnPrimary,
-                      savingAnnotatedPdf && styles.actionBtnDisabled,
+                      styles.actionIconBtnPrimary,
+                      savingAnnotatedPdf && styles.actionIconBtnDisabled,
                     ]}
                     disabled={savingAnnotatedPdf}
                     onPress={saveAnnotatedPdf}
+                    accessibilityLabel="Save annotated PDF"
                   >
-                    <Text style={styles.actionBtnPrimaryText}>
-                      {savingAnnotatedPdf ? 'Saving PDF…' : 'Save annotated PDF'}
-                    </Text>
+                    <MaterialIcons
+                      name={savingAnnotatedPdf ? 'hourglass-empty' : 'save-alt'}
+                      size={22}
+                      color={colors.onPrimary}
+                    />
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[
-                      styles.actionBtnDanger,
-                      !selectedAnnotation && styles.actionBtnDisabled,
+                      styles.actionIconBtnDanger,
+                      !selectedAnnotation && styles.actionIconBtnDisabled,
                     ]}
                     disabled={!selectedAnnotation}
                     onPress={deleteSelectedAnnotation}
+                    accessibilityLabel="Delete selected annotation"
                   >
-                    <Text style={styles.actionBtnDangerText}>Delete selected</Text>
+                    <MaterialIcons name="delete-outline" size={22} color={colors.onPrimary} />
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={styles.actionBtn}
-                    onPress={() => setShowToolbar((currentValue) => !currentValue)}
+                    style={styles.actionIconBtn}
+                    onPress={() => setShowPdfOverflowMenu(true)}
+                    accessibilityLabel="More options"
                   >
-                    <Text style={styles.actionBtnText}>
-                      {showToolbar ? 'Hide tools' : 'Show tools'}
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.actionBtnDanger} onPress={clearAll}>
-                    <Text style={styles.actionBtnDangerText}>Clear all</Text>
+                    <MaterialIcons name="more-horiz" size={24} color={colors.onSurface} />
                   </TouchableOpacity>
                 </>
               )}
               {documentType !== 'pdf' && officePreviewMeta.canConvertToPdf && (
                 <>
+                  <View style={styles.actionBarDivider} />
                   <TouchableOpacity
                     style={[
-                      styles.actionBtnPrimary,
-                      officePdfBusy && styles.actionBtnDisabled,
+                      styles.actionIconBtnPrimary,
+                      officePdfBusy && styles.actionIconBtnDisabled,
                     ]}
                     disabled={officePdfBusy}
                     onPress={convertOfficePreviewToPdf}
+                    accessibilityLabel="Convert to PDF"
                   >
-                    <Text style={styles.actionBtnPrimaryText}>
-                      {officePdfBusy ? 'â³ Converting to PDF...' : 'ðŸ§¾ Convert to PDF'}
-                    </Text>
+                    <MaterialIcons
+                      name={officePdfBusy ? 'hourglass-empty' : 'picture-as-pdf'}
+                      size={22}
+                      color={colors.onPrimary}
+                    />
                   </TouchableOpacity>
                   {officePreviewMeta.isEditable && (
                     <TouchableOpacity
-                      style={styles.actionBtn}
+                      style={styles.actionIconBtn}
                       onPress={() => setShowToolbar((currentValue) => !currentValue)}
+                      accessibilityLabel={
+                        showToolbar ? 'Hide editing tools' : 'Show editing tools'
+                      }
                     >
-                      <Text style={styles.actionBtnText}>
-                        {showToolbar ? 'Hide tools' : 'Show tools'}
-                      </Text>
+                      <MaterialIcons
+                        name={showToolbar ? 'expand-less' : 'expand-more'}
+                        size={22}
+                        color={colors.onSurface}
+                      />
                     </TouchableOpacity>
                   )}
                 </>
@@ -2089,9 +2758,9 @@ export default function EditPdfPage() {
           {documentType !== 'pdf' && officePreviewMeta.isEditable && (
             <View style={styles.selectionBar}>
               <Text style={styles.selectionText}>
-                Basic editing is available in this preview. Tap an image to select
-                it, then drag the corner handle or use the image resize buttons.
-                Use `Convert to PDF` to save the current preview as a PDF copy.
+                Edit text with the toolbar: fonts, sizes, colors (including custom),
+                alignment, lists, and more. Tap an image to resize it. Use Convert to
+                PDF to save a copy.
               </Text>
             </View>
           )}
@@ -2103,19 +2772,20 @@ export default function EditPdfPage() {
                   <TouchableOpacity
                     key={tool.id}
                     style={[
-                      styles.toolBtn,
-                      activeTool === tool.id && styles.toolBtnActive,
+                      styles.toolIconBtn,
+                      activeTool === tool.id && styles.toolIconBtnActive,
                     ]}
                     onPress={() => selectTool(tool.id)}
+                    accessibilityLabel={tool.label}
+                    accessibilityHint={tool.hint}
                   >
-                    <Text
-                      style={[
-                        styles.toolBtnText,
-                        activeTool === tool.id && styles.toolBtnTextActive,
-                      ]}
-                    >
-                      {tool.label}
-                    </Text>
+                    <MaterialIcons
+                      name={tool.icon}
+                      size={24}
+                      color={
+                        activeTool === tool.id ? colors.onPrimary : colors.onSurface
+                      }
+                    />
                   </TouchableOpacity>
                 ))}
               </View>
@@ -2128,11 +2798,124 @@ export default function EditPdfPage() {
                       style={[
                         styles.colorBtn,
                         { backgroundColor: color.value },
-                        activeColor === color.value && styles.colorBtnActive,
+                        activeColor.toUpperCase() === color.value.toUpperCase() &&
+                          styles.colorBtnActive,
                       ]}
                       onPress={() => selectColor(color.value)}
                     />
                   ))}
+                  <TouchableOpacity
+                    style={[
+                      styles.colorBtn,
+                      styles.colorBtnCustom,
+                      !colorMatchesPreset(activeColor) && styles.colorBtnActive,
+                    ]}
+                    onPress={() => openCustomColorModal('pdf')}
+                    accessibilityLabel="Custom color"
+                    accessibilityHint="Opens sliders and hex input for any color"
+                  >
+                    <MaterialIcons name="palette" size={20} color={colors.primaryDim} />
+                  </TouchableOpacity>
+                </View>
+              )}
+              {activeTool === 'draw' && (
+                <View style={styles.brushSliderSection}>
+                  <View style={styles.brushSliderHeader}>
+                    <MaterialIcons name="brush" size={18} color={colors.primary} />
+                    <Text style={styles.brushSliderLabel}>Pen thickness</Text>
+                    <Text style={styles.brushSliderValue}>
+                      {Math.round(drawBrushPx * 2) / 2} pt
+                    </Text>
+                  </View>
+                  <View style={styles.brushTrackRow}>
+                    <TouchableOpacity
+                      onPress={() =>
+                        setDrawBrushPx((v) => Math.max(2, Math.min(24, v - 0.5)))
+                      }
+                      hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                      accessibilityLabel="Decrease pen thickness"
+                    >
+                      <MaterialIcons
+                        name="remove-circle-outline"
+                        size={28}
+                        color={colors.primaryDim}
+                      />
+                    </TouchableOpacity>
+                    <BrushWidthTrack
+                      min={2}
+                      max={24}
+                      value={drawBrushPx}
+                      onChange={setDrawBrushPx}
+                      accessibilityLabel="Set pen thickness"
+                      trackStyle={styles.brushTrackBg}
+                      fillStyle={styles.brushTrackFill}
+                    />
+                    <TouchableOpacity
+                      onPress={() =>
+                        setDrawBrushPx((v) => Math.max(2, Math.min(24, v + 0.5)))
+                      }
+                      hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                      accessibilityLabel="Increase pen thickness"
+                    >
+                      <MaterialIcons
+                        name="add-circle-outline"
+                        size={28}
+                        color={colors.primaryDim}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+              {activeTool === 'marker' && (
+                <View style={styles.brushSliderSection}>
+                  <View style={styles.brushSliderHeader}>
+                    <MaterialIcons
+                      name="format-color-fill"
+                      size={18}
+                      color={colors.primary}
+                    />
+                    <Text style={styles.brushSliderLabel}>Highlighter width</Text>
+                    <Text style={styles.brushSliderValue}>
+                      {Math.round(markerBrushPx * 2) / 2} pt
+                    </Text>
+                  </View>
+                  <View style={styles.brushTrackRow}>
+                    <TouchableOpacity
+                      onPress={() =>
+                        setMarkerBrushPx((v) => Math.max(8, Math.min(36, v - 0.5)))
+                      }
+                      hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                      accessibilityLabel="Decrease highlighter width"
+                    >
+                      <MaterialIcons
+                        name="remove-circle-outline"
+                        size={28}
+                        color={colors.primaryDim}
+                      />
+                    </TouchableOpacity>
+                    <BrushWidthTrack
+                      min={8}
+                      max={36}
+                      value={markerBrushPx}
+                      onChange={setMarkerBrushPx}
+                      accessibilityLabel="Set highlighter width"
+                      trackStyle={styles.brushTrackBg}
+                      fillStyle={styles.brushTrackFill}
+                    />
+                    <TouchableOpacity
+                      onPress={() =>
+                        setMarkerBrushPx((v) => Math.max(8, Math.min(36, v + 0.5)))
+                      }
+                      hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                      accessibilityLabel="Increase highlighter width"
+                    >
+                      <MaterialIcons
+                        name="add-circle-outline"
+                        size={28}
+                        color={colors.primaryDim}
+                      />
+                    </TouchableOpacity>
+                  </View>
                 </View>
               )}
             </View>
@@ -2140,44 +2923,161 @@ export default function EditPdfPage() {
 
           {documentType !== 'pdf' && officePreviewMeta.isEditable && showToolbar && (
             <View style={styles.toolbar}>
-              <View style={styles.toolRow}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.officeIconScroll}
+              >
                 <TouchableOpacity
-                  style={styles.toolBtn}
+                  style={styles.officeIconBtn}
                   onPress={() => applyOfficeStyleCommand('bold')}
+                  accessibilityLabel="Bold"
                 >
-                  <Text style={styles.toolBtnText}>B</Text>
+                  <MaterialIcons name="format-bold" size={22} color={colors.onSurface} />
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.toolBtn}
+                  style={styles.officeIconBtn}
                   onPress={() => applyOfficeStyleCommand('italic')}
+                  accessibilityLabel="Italic"
                 >
-                  <Text style={styles.toolBtnText}>I</Text>
+                  <MaterialIcons name="format-italic" size={22} color={colors.onSurface} />
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.toolBtn}
+                  style={styles.officeIconBtn}
                   onPress={() => applyOfficeStyleCommand('underline')}
+                  accessibilityLabel="Underline"
                 >
-                  <Text style={styles.toolBtnText}>U</Text>
+                  <MaterialIcons name="format-underlined" size={22} color={colors.onSurface} />
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.toolBtn}
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('strikethrough')}
+                  accessibilityLabel="Strikethrough"
+                >
+                  <MaterialIcons name="format-strikethrough" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('subscript')}
+                  accessibilityLabel="Subscript"
+                >
+                  <MaterialIcons name="subscript" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('superscript')}
+                  accessibilityLabel="Superscript"
+                >
+                  <MaterialIcons name="superscript" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+              </ScrollView>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.officeIconScroll}
+              >
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('justifyLeft')}
+                  accessibilityLabel="Align left"
+                >
+                  <MaterialIcons name="format-align-left" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('justifyCenter')}
+                  accessibilityLabel="Align center"
+                >
+                  <MaterialIcons name="format-align-center" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('justifyRight')}
+                  accessibilityLabel="Align right"
+                >
+                  <MaterialIcons name="format-align-right" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('justifyFull')}
+                  accessibilityLabel="Justify"
+                >
+                  <MaterialIcons name="format-align-justify" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('insertUnorderedList')}
+                  accessibilityLabel="Bullet list"
+                >
+                  <MaterialIcons name="format-list-bulleted" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('insertOrderedList')}
+                  accessibilityLabel="Numbered list"
+                >
+                  <MaterialIcons name="format-list-numbered" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('indent')}
+                  accessibilityLabel="Indent"
+                >
+                  <MaterialIcons name="format-indent-increase" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('outdent')}
+                  accessibilityLabel="Outdent"
+                >
+                  <MaterialIcons name="format-indent-decrease" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() => applyOfficeStyleCommand('removeFormat')}
+                  accessibilityLabel="Clear formatting"
+                >
+                  <MaterialIcons name="format-clear" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
+                  onPress={() =>
+                    applyOfficeStyleCommand('hiliteColor', OFFICE_HIGHLIGHT_COLOR)
+                  }
+                  accessibilityLabel="Highlight background"
+                >
+                  <MaterialIcons name="highlight" size={22} color={colors.onSurface} />
+                </TouchableOpacity>
+              </ScrollView>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.officeIconScroll}
+              >
+                <TouchableOpacity
+                  style={styles.officeIconBtn}
                   onPress={insertImageIntoOfficePreview}
+                  accessibilityLabel="Insert image"
                 >
-                  <Text style={styles.toolBtnText}>Image</Text>
+                  <MaterialIcons name="image" size={22} color={colors.onSurface} />
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.toolBtn}
+                  style={styles.officeIconBtn}
                   onPress={() => applyOfficeStyleCommand('scaleImage', 0.85)}
+                  accessibilityLabel="Shrink selected image"
                 >
-                  <Text style={styles.toolBtnText}>Smaller</Text>
+                  <MaterialIcons name="zoom-out" size={22} color={colors.onSurface} />
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.toolBtn}
+                  style={styles.officeIconBtn}
                   onPress={() => applyOfficeStyleCommand('scaleImage', 1.15)}
+                  accessibilityLabel="Enlarge selected image"
                 >
-                  <Text style={styles.toolBtnText}>Larger</Text>
+                  <MaterialIcons name="zoom-in" size={22} color={colors.onSurface} />
                 </TouchableOpacity>
-              </View>
+              </ScrollView>
 
               <View style={styles.officeOptionRow}>
                 {OFFICE_FONT_FAMILY_OPTIONS.map((fontOption) => (
@@ -2196,7 +3096,7 @@ export default function EditPdfPage() {
               <View style={styles.officeOptionRow}>
                 {OFFICE_FONT_SIZE_OPTIONS.map((fontSizeOption) => (
                   <TouchableOpacity
-                    key={fontSizeOption.value}
+                    key={fontSizeOption.label}
                     style={styles.officeOptionBtn}
                     onPress={() =>
                       applyOfficeStyleCommand(
@@ -2217,11 +3117,23 @@ export default function EditPdfPage() {
                     style={[
                       styles.colorBtn,
                       { backgroundColor: color.value },
-                      activeColor === color.value && styles.colorBtnActive,
+                      activeColor.toUpperCase() === color.value.toUpperCase() &&
+                        styles.colorBtnActive,
                     ]}
                     onPress={() => applyOfficeTextColor(color.value)}
                   />
                 ))}
+                <TouchableOpacity
+                  style={[
+                    styles.colorBtn,
+                    styles.colorBtnCustom,
+                    !colorMatchesPreset(activeColor) && styles.colorBtnActive,
+                  ]}
+                  onPress={() => openCustomColorModal('office')}
+                  accessibilityLabel="Custom text color"
+                >
+                  <MaterialIcons name="palette" size={20} color={colors.primaryDim} />
+                </TouchableOpacity>
               </View>
             </View>
           )}
@@ -2437,6 +3349,104 @@ export default function EditPdfPage() {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        visible={showPdfOverflowMenu}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowPdfOverflowMenu(false)}
+      >
+        <View style={styles.overflowMenuOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setShowPdfOverflowMenu(false)}
+          />
+          <View style={styles.overflowMenuCard}>
+            <Text style={styles.overflowMenuTitle}>More options</Text>
+            <TouchableOpacity
+              style={styles.overflowMenuRow}
+              onPress={() => {
+                setShowToolbar((v) => !v);
+                setShowPdfOverflowMenu(false);
+              }}
+            >
+              <MaterialIcons
+                name={showToolbar ? 'visibility-off' : 'visibility'}
+                size={22}
+                color={colors.onSurface}
+              />
+              <Text style={styles.overflowMenuRowText}>
+                {showToolbar ? 'Hide annotation tools' : 'Show annotation tools'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.overflowMenuRow}
+              onPress={() => {
+                setShowPdfOverflowMenu(false);
+                clearAll();
+              }}
+            >
+              <MaterialIcons name="delete-sweep" size={22} color={ui.danger} />
+              <Text style={[styles.overflowMenuRowText, styles.overflowMenuRowDanger]}>
+                Clear all annotations
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.overflowMenuClose}
+              onPress={() => setShowPdfOverflowMenu(false)}
+            >
+              <Text style={styles.modalBtnCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={showRenameModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowRenameModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Document name</Text>
+            <Text style={styles.renameHint}>
+              Used when saving and sharing. If you omit the extension, .{documentType || 'pdf'} is added.
+            </Text>
+            <TextInput
+              style={styles.renameInput}
+              value={renameDraft}
+              onChangeText={setRenameDraft}
+              placeholder="File name"
+              placeholderTextColor={withAlpha(colors.onSurface, 0.45)}
+              autoFocus
+              selectTextOnFocus
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalBtnCancel}
+                onPress={() => setShowRenameModal(false)}
+              >
+                <Text style={styles.modalBtnCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalBtnSubmit}
+                onPress={applyDocumentRename}
+              >
+                <Text style={styles.modalBtnSubmitText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <CustomColorModal
+        visible={customColorModalVisible}
+        seedHex={activeColor}
+        title={customColorModalTitle}
+        onApply={handleCustomColorApply}
+        onClose={() => setCustomColorModalVisible(false)}
+      />
     </View>
   );
 }
@@ -2585,26 +3595,53 @@ const styles = StyleSheet.create({
     backgroundColor: ui.shell,
   },
   header: {
-    paddingTop: Platform.OS === 'android' ? 40 : 50,
     paddingBottom: 12,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: ui.shellElevated,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.outlineVariant,
+  },
+  headerTitleBlock: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: spacing.sm,
   },
   headerTitle: {
     color: colors.onSurface,
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
     flex: 1,
+    letterSpacing: -0.2,
   },
-  pageCount: {
+  headerEditIcon: {
+    marginLeft: 6,
+  },
+  pageCountPill: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    backgroundColor: colors.surfaceContainerLow,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.primary, 0.22),
+  },
+  pageCountLabel: {
+    color: colors.primary,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  pageCountSuffix: {
     color: ui.textSoft,
-    fontSize: 13,
-    marginLeft: 8,
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   landing: {
     flex: 1,
@@ -2668,10 +3705,51 @@ const styles = StyleSheet.create({
   },
   actionBar: {
     backgroundColor: ui.shellElevated,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.outlineVariant,
+  },
+  actionBarScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingRight: spacing.md,
+  },
+  actionIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.sm,
+    backgroundColor: colors.surfaceContainerLowest,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.65),
+  },
+  actionIconBtnPrimary: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.sm,
+    backgroundColor: colors.primaryDim,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionIconBtnDanger: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.sm,
+    backgroundColor: ui.danger,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionIconBtnDisabled: {
+    opacity: 0.45,
+  },
+  actionBarDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 26,
+    backgroundColor: withAlpha(colors.outlineVariant, 0.9),
+    marginHorizontal: 4,
   },
   actionBtn: {
     backgroundColor: ui.shellSoft,
@@ -2726,14 +3804,31 @@ const styles = StyleSheet.create({
   },
   toolbar: {
     backgroundColor: ui.shell,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.outlineVariant,
   },
   toolRow: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  toolIconBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: radius.md,
+    backgroundColor: ui.shellElevated,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.55),
+  },
+  toolIconBtnActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primaryDim,
   },
   toolBtn: {
     paddingHorizontal: spacing.sm,
@@ -2787,6 +3882,50 @@ const styles = StyleSheet.create({
   colorBtnActive: {
     borderColor: '#fff',
     borderWidth: 3,
+  },
+  brushSliderSection: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: withAlpha(colors.outlineVariant, 0.65),
+  },
+  brushSliderHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+  },
+  brushSliderLabel: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '700',
+    color: withAlpha(colors.onSurface, 0.78),
+    letterSpacing: 0.3,
+  },
+  brushSliderValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primary,
+    minWidth: 44,
+    textAlign: 'right',
+  },
+  brushTrackRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  brushTrackBg: {
+    flex: 1,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: withAlpha(colors.outlineVariant, 0.45),
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  brushTrackFill: {
+    height: '100%',
+    borderRadius: 5,
+    backgroundColor: colors.primary,
   },
   webView: {
     flex: 1,
@@ -2842,6 +3981,284 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     width: '85%',
     maxWidth: 400,
+  },
+  customColorModalContent: {
+    maxWidth: 440,
+    maxHeight: '92%',
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.sm,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 12 },
+        shadowOpacity: 0.18,
+        shadowRadius: 24,
+      },
+      android: {
+        elevation: 12,
+      },
+    }),
+  },
+  customColorHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+    marginBottom: 4,
+  },
+  customColorHeaderTitle: {
+    flex: 1,
+    fontSize: 18,
+    fontWeight: '700',
+    color: colors.onSurface,
+    letterSpacing: 0.2,
+    paddingRight: 8,
+  },
+  customColorScroll: {
+    maxHeight: 520,
+  },
+  customColorHint: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: withAlpha(colors.onSurface, 0.7),
+    marginBottom: 14,
+  },
+  customColorPreviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginBottom: 18,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: radius.sm,
+    backgroundColor: withAlpha(colors.primary, 0.06),
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.4),
+  },
+  customColorPreviewCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 3,
+    borderColor: withAlpha(colors.onSurface, 0.12),
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.12,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 3,
+      },
+    }),
+  },
+  customColorPreviewMeta: {
+    flex: 1,
+  },
+  customColorPreviewLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: withAlpha(colors.onSurface, 0.55),
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 4,
+  },
+  customColorPreviewHex: {
+    fontSize: 17,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: colors.primaryDim,
+  },
+  customColorSectionLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: withAlpha(colors.onSurface, 0.62),
+    textTransform: 'uppercase',
+    letterSpacing: 0.9,
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  spectrumPadOuter: {
+    borderRadius: 14,
+    overflow: 'hidden',
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.5),
+  },
+  spectrumPad: {
+    width: '100%',
+    height: 200,
+    borderRadius: 14,
+    overflow: 'hidden',
+  },
+  svThumb: {
+    position: 'absolute',
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 3,
+    borderColor: '#ffffff',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.45,
+        shadowRadius: 3,
+      },
+      android: {
+        elevation: 4,
+      },
+    }),
+  },
+  hueStripOuter: {
+    height: 34,
+    borderRadius: 10,
+    overflow: 'hidden',
+    marginBottom: 8,
+    position: 'relative',
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.45),
+  },
+  hueStripGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  hueStripOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'transparent',
+  },
+  hueThumb: {
+    position: 'absolute',
+    width: 5,
+    top: 0,
+    bottom: 0,
+    borderRadius: 3,
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.4,
+        shadowRadius: 2,
+      },
+      android: {
+        elevation: 3,
+      },
+    }),
+  },
+  customColorGradientHint: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: withAlpha(colors.onSurface, 0.58),
+    marginBottom: 10,
+  },
+  gradientPresetsScroll: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 4,
+    marginBottom: 14,
+    paddingRight: 8,
+  },
+  gradientPresetChip: {
+    width: 92,
+    borderRadius: 10,
+    overflow: 'hidden',
+    backgroundColor: ui.shellElevated,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.4),
+  },
+  gradientPresetFill: {
+    height: 36,
+    width: '100%',
+  },
+  gradientPresetLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: withAlpha(colors.onSurface, 0.75),
+    textAlign: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    backgroundColor: colors.surfaceContainerLowest,
+  },
+  customColorAdvancedToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    marginBottom: 4,
+  },
+  customColorAdvancedToggleText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    color: withAlpha(colors.onSurface, 0.82),
+  },
+  customColorHexInput: {
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.45),
+    borderRadius: radius.sm,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: colors.onSurface,
+    marginBottom: 8,
+    backgroundColor: withAlpha(colors.surfaceContainerLow, 0.85),
+  },
+  customColorRgbRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  customColorChannelLabel: {
+    width: 44,
+    fontSize: 12,
+    fontWeight: '600',
+    color: withAlpha(colors.onSurface, 0.78),
+  },
+  customColorChannelValue: {
+    width: 36,
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.primary,
+    textAlign: 'right',
+  },
+  customColorTrack: {
+    flex: 1,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: withAlpha(colors.outlineVariant, 0.45),
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  colorBtnCustom: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: ui.shellElevated,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.55),
+  },
+  officeIconScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 4,
+    marginBottom: 4,
+  },
+  officeIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.sm,
+    backgroundColor: ui.shellElevated,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.45),
   },
   modalTitle: {
     fontSize: 18,
@@ -2971,6 +4388,70 @@ const styles = StyleSheet.create({
     color: colors.onPrimary,
     fontSize: 14,
     fontWeight: '600',
+  },
+  overflowMenuOverlay: {
+    flex: 1,
+    backgroundColor: withAlpha(colors.onSurface, 0.42),
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: spacing.lg,
+  },
+  overflowMenuCard: {
+    backgroundColor: colors.surfaceContainerLowest,
+    borderRadius: radius.md,
+    paddingVertical: spacing.sm,
+    width: '100%',
+    maxWidth: 340,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.5),
+  },
+  overflowMenuTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: withAlpha(colors.primary, 0.95),
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.xs,
+    paddingTop: spacing.xs,
+  },
+  overflowMenuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: spacing.md,
+  },
+  overflowMenuRowText: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    color: colors.onSurface,
+  },
+  overflowMenuRowDanger: {
+    color: ui.danger,
+    fontWeight: '600',
+  },
+  overflowMenuClose: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    marginTop: 4,
+  },
+  renameHint: {
+    color: withAlpha(colors.onSurface, 0.65),
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  renameInput: {
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.45),
+    borderRadius: radius.sm,
+    padding: 12,
+    fontSize: 15,
+    minHeight: 48,
+    color: colors.onSurface,
+    marginBottom: 16,
   },
 });
 
