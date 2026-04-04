@@ -154,7 +154,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   cancelText: {
-    color: colors.onPrimary,
+    color: colors.primary,
     fontWeight: "500",
   },
 });

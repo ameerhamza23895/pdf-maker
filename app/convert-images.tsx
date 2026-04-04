@@ -30,7 +30,7 @@ export default function ConvertImagesPage() {
 
   const scrollViewRef = useRef<ScrollView | null>(null);
   const scrollOffset = useRef(0);
-  const scrollTimer = useRef<NodeJS.Timeout | null>(null);
+  const scrollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMoveY = useRef<number | null>(null);
 
   const [gridData, setGridData] = useState<any[]>([]);
@@ -169,7 +169,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: spacing.md },
   header: { marginBottom: spacing.md },
   title: { ...typography.headlineMd, color: colors.onSurface },
-  subtitle: { ...typography.bodyMedium, color: colors.onSurfaceVariant },
+  subtitle: { ...typography.bodyMd, color: colors.onSurface },
   gridContainer: { paddingBottom: 120 },
   draggableGrid: { backgroundColor: colors.surface },
   imageCard: {

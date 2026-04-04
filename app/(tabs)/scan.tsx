@@ -1,9 +1,11 @@
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
+import type { BarcodeScanningResult } from "expo-camera";
 import { CameraType, CameraView, useCameraPermissions } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 import { useRouter } from "expo-router";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Button,
   StyleSheet,
@@ -11,34 +13,58 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { QRResultModal } from "@/src/components/QRResultModal";
 import { useEditImages } from "@/src/context/edit-images-context";
 import { electricCuratorTheme } from "@/src/theme/electric-curator";
 
-const CameraViewAny = CameraView as any;
-
 const { colors, spacing, radius } = electricCuratorTheme;
+
+/** Single-shot AF locks focus; "off" lets the device adjust continuously (better for QR). */
+type AutofocusMode = "on" | "off";
 
 export default function ScanPage() {
   const [facing, setFacing] = useState<CameraType>("back");
   const [flash, setFlash] = useState<"off" | "on">("off");
-  const [autoFocus, setAutoFocus] = useState(true);
+  const [autofocusMode, setAutofocusMode] = useState<AutofocusMode>("off");
   const [scanEnabled, setScanEnabled] = useState(true);
   const router = useRouter();
   const { addImages } = useEditImages();
   const [permission, requestPermission] = useCameraPermissions();
   const [scannedData, setScannedData] = useState<string | null>(null);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const cameraRef = useRef<InstanceType<typeof CameraView>>(null);
+  const lastQrAtRef = useRef(0);
+  const insets = useSafeAreaInsets();
+
+  useEffect(() => {
+    setCameraReady(false);
+  }, [facing]);
+
+  const handleBarCodeScanned = useCallback(
+    (result: BarcodeScanningResult) => {
+      if (!scanEnabled || scannedData) {
+        return;
+      }
+      const now = Date.now();
+      if (now - lastQrAtRef.current < 1200) {
+        return;
+      }
+      lastQrAtRef.current = now;
+      setScannedData(result.data);
+    },
+    [scanEnabled, scannedData],
+  );
 
   if (!permission) {
-    return <View style={styles.container} />;
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
   }
-
-  const handleBarCodeScanned = ({ data }: { data: string }) => {
-    if (!scannedData) {
-      setScannedData(data);
-    }
-  };
 
   if (!permission.granted) {
     return (
@@ -63,9 +89,31 @@ export default function ScanPage() {
     setScanEnabled((current) => !current);
   }
 
-  function toggleAutoFocus() {
-    setAutoFocus((current) => !current);
+  function toggleAutofocusMode() {
+    setAutofocusMode((current) => (current === "off" ? "on" : "off"));
   }
+
+  const takePicture = async () => {
+    if (!cameraRef.current || !cameraReady || capturing) {
+      return;
+    }
+    try {
+      setCapturing(true);
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.92,
+        skipProcessing: false,
+      });
+      if (photo?.uri) {
+        addImages([photo.uri]);
+        router.push("/edit-images");
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Could not capture photo.";
+      Alert.alert("Capture failed", message);
+    } finally {
+      setCapturing(false);
+    }
+  };
 
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -94,17 +142,23 @@ export default function ScanPage() {
 
   return (
     <View style={styles.container}>
-      <CameraViewAny
+      <CameraView
+        ref={cameraRef}
         style={styles.camera}
         facing={facing}
+        mode="picture"
         enableTorch={flash === "on"}
-        autoFocus={autoFocus}
+        autofocus={autofocusMode}
         barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-        barCodeScannerSettings={{ barCodeTypes: ["qr"] }}
+        onCameraReady={() => setCameraReady(true)}
+        onMountError={(event) => {
+          setCameraReady(false);
+          Alert.alert(
+            "Camera error",
+            event.message || "Could not start the camera preview.",
+          );
+        }}
         onBarcodeScanned={
-          scanEnabled && !scannedData ? handleBarCodeScanned : undefined
-        }
-        onBarCodeScanned={
           scanEnabled && !scannedData ? handleBarCodeScanned : undefined
         }
       />
@@ -115,7 +169,12 @@ export default function ScanPage() {
         onClose={() => setScannedData(null)}
       />
 
-      <View style={styles.topControls}>
+      <View
+        style={[
+          styles.topControls,
+          { paddingTop: Math.max(insets.top, spacing.sm) },
+        ]}
+      >
         <TouchableOpacity
           style={[styles.iconButton, scanEnabled && styles.iconButtonActive]}
           onPress={toggleScanEnabled}
@@ -136,13 +195,20 @@ export default function ScanPage() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.iconButton, autoFocus && styles.iconButtonActive]}
-          onPress={toggleAutoFocus}
+          style={[
+            styles.iconButton,
+            autofocusMode === "on" && styles.iconButtonActive,
+          ]}
+          onPress={toggleAutofocusMode}
         >
           <MaterialIcons
             name="center-focus-strong"
             size={20}
-            color={autoFocus ? colors.primaryContainer : colors.onSurface}
+            color={
+              autofocusMode === "on"
+                ? colors.primaryContainer
+                : colors.onSurface
+            }
           />
         </TouchableOpacity>
 
@@ -167,7 +233,12 @@ export default function ScanPage() {
         </View>
       </View>
 
-      <View style={styles.bottomRow}>
+      <View
+        style={[
+          styles.bottomRow,
+          { paddingBottom: Math.max(insets.bottom, spacing.sm) },
+        ]}
+      >
         <TouchableOpacity style={styles.galleryButton} onPress={pickImage}>
           <MaterialIcons
             name="photo-library"
@@ -177,8 +248,19 @@ export default function ScanPage() {
         </TouchableOpacity>
 
         <View style={styles.captureWrapper}>
-          <TouchableOpacity style={styles.captureButton} />
-          <Text style={styles.captureLabel}>Capture</Text>
+          <TouchableOpacity
+            style={[
+              styles.captureButton,
+              (!cameraReady || capturing) && styles.captureButtonDisabled,
+            ]}
+            disabled={!cameraReady || capturing}
+            onPress={takePicture}
+            accessibilityRole="button"
+            accessibilityLabel="Capture photo"
+          />
+          <Text style={styles.captureLabel}>
+            {capturing ? "Saving…" : "Capture"}
+          </Text>
         </View>
 
         <View style={styles.placeholder} />
@@ -191,7 +273,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.surface,
-    marginBottom: spacing.sm,
   },
   message: {
     textAlign: "center",
@@ -202,7 +283,7 @@ const styles = StyleSheet.create({
   },
   topControls: {
     position: "absolute",
-    top: spacing.sm,
+    top: 0,
     left: spacing.sm,
     right: spacing.sm,
     flexDirection: "row",
@@ -242,7 +323,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     width: 24,
     height: 24,
-    borderColor: colors.onPrimary,
+    borderColor: colors.surfaceContainerLowest,
   },
   topLeft: {
     top: 0,
@@ -295,11 +376,14 @@ const styles = StyleSheet.create({
     borderRadius: 72,
     borderWidth: 4,
     borderColor: colors.surfaceContainerLowest,
-    backgroundColor: colors.onPrimary,
+    backgroundColor: colors.primary,
+  },
+  captureButtonDisabled: {
+    opacity: 0.45,
   },
   captureLabel: {
     marginTop: 8,
-    color: colors.onPrimary,
+    color: colors.onSurface,
     fontSize: 12,
     fontWeight: "600",
   },
