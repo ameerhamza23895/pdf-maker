@@ -120,23 +120,28 @@ export default function ConvertImagesPage() {
 
         <ScrollView
           ref={scrollViewRef}
+          style={styles.gridScroll}
           scrollEnabled={isScrollEnabled}
           onScroll={(e) => {
             scrollOffset.current = e.nativeEvent.contentOffset.y;
           }}
           scrollEventThrottle={16}
+          showsVerticalScrollIndicator
           contentContainerStyle={styles.gridContainer}
+          nestedScrollEnabled
         >
-          <DraggableGrid
-            numColumns={3}
-            data={gridData}
-            renderItem={renderItem}
-            onDragStart={onDragStart}
-            onDragRelease={handleDragRelease}
-            onDragging={handleDragging}
-            itemHeight={imageSize + 8}
-            style={styles.draggableGrid}
-          />
+          <View style={styles.gridWidth}>
+            <DraggableGrid
+              numColumns={3}
+              data={gridData}
+              renderItem={renderItem}
+              onDragStart={onDragStart}
+              onDragRelease={handleDragRelease}
+              onDragging={handleDragging}
+              itemHeight={imageSize + 8}
+              style={styles.draggableGrid}
+            />
+          </View>
         </ScrollView>
 
         <View style={styles.footer}>
@@ -170,8 +175,23 @@ const styles = StyleSheet.create({
   header: { marginBottom: spacing.md },
   title: { ...typography.headlineMd, color: colors.onSurface },
   subtitle: { ...typography.bodyMd, color: colors.onSurface },
-  gridContainer: { paddingBottom: 120 },
-  draggableGrid: { backgroundColor: colors.surface },
+  gridScroll: {
+    flex: 1,
+    width: "100%",
+  },
+  gridContainer: {
+    flexGrow: 1,
+    paddingBottom: 120,
+    width: "100%",
+  },
+  gridWidth: {
+    width: "100%",
+    alignSelf: "stretch",
+  },
+  draggableGrid: {
+    width: "100%",
+    backgroundColor: colors.surface,
+  },
   imageCard: {
     borderRadius: radius.md,
     overflow: "hidden",

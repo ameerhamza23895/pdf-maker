@@ -1,12 +1,13 @@
 import React, { createContext, useContext, useState } from "react";
 
-export type ImageFilter = "none" | "mono" | "warm" | "cool";
+import type { ImageFilterId } from "@/src/constants/imageFilterPresets";
 
 export type EditableImage = {
   id: string;
   uri: string;
   rotation: number;
-  filter: ImageFilter;
+  /** Per-image preset; each thumbnail keeps its own value. */
+  filter: ImageFilterId;
   crop: {
     top: number;
     left: number;
@@ -14,7 +15,7 @@ export type EditableImage = {
     bottom: number;
   };
   processedUri?: string;
-  key?: string; // Added for DraggableGrid compatibility
+  key?: string;
 };
 
 type EditImagesContextType = {
@@ -45,13 +46,13 @@ export function EditImagesProvider({
   const [currentIndex, setCurrentIndex] = useState(0);
 
   const addImages = (uris: string[]) => {
-    const newBatch = uris.map((uri) => ({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    const newBatch = uris.map((uri, index) => ({
+      id: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
       uri,
       rotation: 0,
-      filter: "none" as ImageFilter,
+      filter: "none" as ImageFilterId,
       crop: { top: 0, left: 0, right: 0, bottom: 0 },
-      key: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      key: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
     }));
     setBatchImagesState(newBatch);
     setCurrentIndex(0);
