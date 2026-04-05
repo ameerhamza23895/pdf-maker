@@ -35,6 +35,12 @@ import { WebView } from 'react-native-webview';
 import { getPdfViewerHtml } from '@/src/utils/pdfViewerHtml';
 import { getPdfConverterHtml } from '@/src/utils/pdfConverterHtml';
 import { getOfficePreviewHtml } from '@/src/utils/officePreviewHtml';
+import {
+  DOCUMENT_PICKER_TYPES,
+  OFFICE_PREVIEW_TYPES,
+} from '@/src/constants/documentPicker';
+import * as PdfConversionFormats from '@/src/constants/pdfConversionFormats';
+import { consumePendingEditDocument } from '@/src/navigation/pendingEditDocument';
 
 const { colors, spacing, radius } = electricCuratorTheme;
 const ui = {
@@ -114,66 +120,6 @@ const DEFAULT_COLOR = COLORS[0].value;
 const HIGHLIGHT_ALPHA_HEX = '66';
 const ANNOTATION_STORAGE_DIR = `${Paths.document.uri}annotation-state/`;
 const WORKING_PDF_SUFFIX = '.working.pdf';
-const OFFICE_PREVIEW_TYPES = ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'];
-
-/** MIME types for the system file picker; includes a catch-all type so JSON and code files show on all devices. */
-const DOCUMENT_PICKER_TYPES = [
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'text/plain',
-  'text/markdown',
-  'text/html',
-  'text/css',
-  'text/javascript',
-  'application/javascript',
-  'application/json',
-  'application/xml',
-  'text/xml',
-  'text/yaml',
-  'application/x-yaml',
-  'application/octet-stream',
-  'image/*',
-  '*/*',
-];
-const PDF_CONVERSION_FORMATS = [
-  {
-    id: 'docx',
-    label: 'Word (.docx)',
-    extension: 'docx',
-    mimeType:
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  },
-  {
-    id: 'pptx',
-    label: 'PowerPoint (.pptx)',
-    extension: 'pptx',
-    mimeType:
-      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  },
-  {
-    id: 'txt',
-    label: 'Text (.txt)',
-    extension: 'txt',
-    mimeType: 'text/plain',
-  },
-  {
-    id: 'md',
-    label: 'Markdown (.md)',
-    extension: 'md',
-    mimeType: 'text/markdown',
-  },
-  {
-    id: 'html',
-    label: 'HTML (.html)',
-    extension: 'html',
-    mimeType: 'text/html',
-  },
-];
 /** Full list for font picker modal (Word-style dropdown). */
 const OFFICE_FONT_DROPDOWN_OPTIONS = [
   { label: 'Arial', value: 'Arial' },
@@ -491,6 +437,46 @@ function removePageFromAnnotationState(rawAnnotations, removedPageNumber) {
   return nextAnnotations;
 }
 
+/** Move page `fromPage` to sit after page `toAfterPage` (1-based). */
+function reorderPageInAnnotationState(
+  rawAnnotations,
+  fromPage,
+  toAfterPage,
+  pageCount
+) {
+  const norm = normalizeAnnotationState(rawAnnotations);
+  const order = [];
+  for (let p = 1; p <= pageCount; p += 1) {
+    order.push(p);
+  }
+  const fromIdx = order.indexOf(fromPage);
+  if (fromIdx === -1) {
+    return norm;
+  }
+  order.splice(fromIdx, 1);
+  const afterIdx = order.indexOf(toAfterPage);
+  const insertAt = afterIdx === -1 ? order.length : afterIdx + 1;
+  order.splice(insertAt, 0, fromPage);
+  const next = {};
+  order.forEach((oldPageNum, i) => {
+    const key = String(i + 1);
+    const src = norm[String(oldPageNum)] || norm[oldPageNum];
+    next[key] = src || createEmptyPageAnnotations();
+  });
+  return next;
+}
+
+function shortDocLabel(name, maxLen = 22) {
+  if (!name || typeof name !== 'string') {
+    return 'Untitled';
+  }
+  const trimmed = name.trim();
+  if (trimmed.length <= maxLen) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, Math.max(1, maxLen - 1))}…`;
+}
+
 function sanitizeFileSegment(value = 'document') {
   return (
     value
@@ -509,10 +495,6 @@ function buildTimestampToken() {
 
 function buildAnnotatedFileName(documentName) {
   return `${sanitizeFileSegment(documentName)}_annotated_${buildTimestampToken()}.pdf`;
-}
-
-function buildConvertedFileName(documentName, extension) {
-  return `${sanitizeFileSegment(documentName)}_converted_${buildTimestampToken()}.${extension}`;
 }
 
 function parseHexColor(hexColor, fallbackOpacity = 1) {
@@ -1278,9 +1260,41 @@ export default function EditPdfPage() {
   const [drawBrushPx, setDrawBrushPx] = useState(6);
   const [markerBrushPx, setMarkerBrushPx] = useState(16);
 
+  const [secondaryUri, setSecondaryUri] = useState(null);
+  const [secondaryName, setSecondaryName] = useState('');
+  const [secondaryType, setSecondaryType] = useState('');
+  const [secondaryKey, setSecondaryKey] = useState(null);
+  const [secondaryBase64, setSecondaryBase64] = useState(null);
+  const [secondaryViewerHtml, setSecondaryViewerHtml] = useState(null);
+  const [secondaryAnnotationState, setSecondaryAnnotationState] = useState({});
+  const [secondaryTotalPages, setSecondaryTotalPages] = useState(0);
+  const [secondaryViewerInstanceId, setSecondaryViewerInstanceId] = useState(0);
+  const [secondaryOfficeMeta, setSecondaryOfficeMeta] = useState({
+    previewKind: '',
+    canConvertToPdf: false,
+    isEditable: false,
+  });
+  /** 1 = primary document, 2 = second document (toolbar + commands target this pane). */
+  const [activePane, setActivePane] = useState(1);
+  /** `row` = side-by-side, `column` = top / bottom */
+  const [dualLayout, setDualLayout] = useState('row');
+  const [showOpenChoiceModal, setShowOpenChoiceModal] = useState(false);
+  const [showPageTransferModal, setShowPageTransferModal] = useState(false);
+  const [pageTransferBusy, setPageTransferBusy] = useState(false);
+  const [pageTransferSourcePane, setPageTransferSourcePane] = useState(1);
+  const [pageTransferTargetPane, setPageTransferTargetPane] = useState(2);
+  const [pageTransferSourcePage, setPageTransferSourcePage] = useState('1');
+  const [pageTransferInsertBefore, setPageTransferInsertBefore] = useState('1');
+  const [pageTransferMode, setPageTransferMode] = useState('copy');
+  const [showDualPdfGuide, setShowDualPdfGuide] = useState(true);
+
   const insets = useSafeAreaInsets();
 
   const webViewRef = useRef(null);
+  const webViewRef2 = useRef(null);
+  /** Which pane (1 or 2) initiated image export / office PDF export (file names). */
+  const exportContextPaneRef = useRef(1);
+  const officeExportSlotRef = useRef(1);
   const conversionChunksRef = useRef({
     fileName: '',
     mimeType: '',
@@ -1315,16 +1329,32 @@ export default function EditPdfPage() {
   }, []);
 
   const buildViewerHtml = useCallback(
-    (nextBase64, nextAnnotations, nextMode = 'view', nextSelectedPage = 1) =>
+    (
+      nextBase64,
+      nextAnnotations,
+      nextMode = 'view',
+      nextSelectedPage = 1,
+      htmlOptions = {}
+    ) =>
       getPdfViewerHtml(nextBase64, {
         initialAnnotations: nextAnnotations,
         initialMode: nextMode,
         initialDrawColor: activeColor,
         initialHighlightColor: activeColor + HIGHLIGHT_ALPHA_HEX,
         initialSelectedPage: nextSelectedPage,
+        viewerSlot: htmlOptions.viewerSlot ?? 1,
+        crossPaneDragEnabled: !!htmlOptions.crossPaneDragEnabled,
+        dualLayout: htmlOptions.dualLayout === 'column' ? 'column' : 'row',
       }),
     [activeColor]
   );
+
+  const crossPdfDropPendingRef = useRef(null);
+  const [crossPdfDropBanner, setCrossPdfDropBanner] = useState(false);
+  const [crossPdfDropMode, setCrossPdfDropMode] = useState('copy');
+
+  const isDualPdfMode =
+    !!secondaryUri && documentType === 'pdf' && secondaryType === 'pdf';
 
   const writeAnnotationSnapshot = useCallback(
     async (nextDocumentKey, nextAnnotations) => {
@@ -1456,20 +1486,43 @@ export default function EditPdfPage() {
     return base64Data;
   }, [base64Data, documentKey, loadWorkingPdfCopy]);
 
-  const buildEditedPdfBase64 = useCallback(async () => {
-    const editablePdfBase64 = await loadEditablePdfBase64();
+  const loadEditablePdfBase64ForPane = useCallback(
+    async (pane) => {
+      if (pane === 1) {
+        return loadEditablePdfBase64();
+      }
+      if (secondaryKey) {
+        const workingPdfBase64 = await loadWorkingPdfCopy(secondaryKey);
+        if (workingPdfBase64) {
+          return workingPdfBase64;
+        }
+      }
+      return secondaryBase64;
+    },
+    [loadEditablePdfBase64, loadWorkingPdfCopy, secondaryBase64, secondaryKey]
+  );
 
-    if (!editablePdfBase64) {
-      throw new Error('No editable PDF data found.');
-    }
+  const buildEditedPdfBase64 = useCallback(
+    async (paneOverride) => {
+      const pane = paneOverride ?? activePane;
+      const editablePdfBase64 = await loadEditablePdfBase64ForPane(pane);
 
-    return bakePdfWithAnnotations(editablePdfBase64, annotationState);
-  }, [annotationState, loadEditablePdfBase64]);
+      if (!editablePdfBase64) {
+        throw new Error('No editable PDF data found.');
+      }
+
+      const ann = pane === 1 ? annotationState : secondaryAnnotationState;
+      return bakePdfWithAnnotations(editablePdfBase64, ann);
+    },
+    [activePane, annotationState, loadEditablePdfBase64ForPane, secondaryAnnotationState]
+  );
 
   const buildEditedPdfFile = useCallback(
-    async (outputDirectoryUri = Paths.cache.uri) => {
-      const bakedPdfBase64 = await buildEditedPdfBase64();
-      const fileName = buildAnnotatedFileName(documentName);
+    async (outputDirectoryUri = Paths.cache.uri, paneOverride) => {
+      const bakedPdfBase64 = await buildEditedPdfBase64(paneOverride);
+      const pane = paneOverride ?? activePane;
+      const exportName = pane === 1 ? documentName : secondaryName;
+      const fileName = buildAnnotatedFileName(exportName);
       const outputUri = `${outputDirectoryUri}${fileName}`;
 
       await LegacyFileSystem.writeAsStringAsync(outputUri, bakedPdfBase64, {
@@ -1482,7 +1535,7 @@ export default function EditPdfPage() {
         outputUri,
       };
     },
-    [buildEditedPdfBase64, documentName]
+    [activePane, buildEditedPdfBase64, documentName, secondaryName]
   );
 
   const promptForPdfShareChoice = useCallback(
@@ -1546,6 +1599,24 @@ export default function EditPdfPage() {
     setOfficePdfBusy(false);
   }, []);
 
+  const clearSecondaryDocument = useCallback(() => {
+    setSecondaryUri(null);
+    setSecondaryName('');
+    setSecondaryType('');
+    setSecondaryKey(null);
+    setSecondaryBase64(null);
+    setSecondaryViewerHtml(null);
+    setSecondaryAnnotationState({});
+    setSecondaryTotalPages(0);
+    setSecondaryViewerInstanceId(0);
+    setSecondaryOfficeMeta({
+      previewKind: '',
+      canConvertToPdf: false,
+      isEditable: false,
+    });
+    setActivePane(1);
+  }, []);
+
   useEffect(() => {
     if (TEXT_FILE_EXTENSIONS.includes(documentType)) {
       setOfficePreviewMeta({
@@ -1555,6 +1626,16 @@ export default function EditPdfPage() {
       });
     }
   }, [documentType]);
+
+  useEffect(() => {
+    if (secondaryUri && TEXT_FILE_EXTENSIONS.includes(secondaryType)) {
+      setSecondaryOfficeMeta({
+        previewKind: 'text',
+        canConvertToPdf: false,
+        isEditable: true,
+      });
+    }
+  }, [secondaryUri, secondaryType]);
 
   const openRenameModal = useCallback(() => {
     if (!documentUri) {
@@ -1638,12 +1719,52 @@ export default function EditPdfPage() {
       );
       setTotalPages(nextPageCount);
       setPageNumberInput(String(safeSelectedPage));
+      const dualPdf =
+        !!secondaryUri && documentType === 'pdf' && secondaryType === 'pdf';
       setViewerHtml(
-        buildViewerHtml(nextBase64, nextAnnotations, nextMode, safeSelectedPage)
+        buildViewerHtml(nextBase64, nextAnnotations, nextMode, safeSelectedPage, {
+          viewerSlot: 1,
+          crossPaneDragEnabled: dualPdf,
+          dualLayout,
+        })
       );
       setViewerInstanceId((currentValue) => currentValue + 1);
     },
-    [buildViewerHtml]
+    [buildViewerHtml, documentType, dualLayout, secondaryType, secondaryUri]
+  );
+
+  const applySecondaryPdfEditorState = useCallback(
+    (
+      nextBase64,
+      nextAnnotations,
+      nextPageCount,
+      nextMode = 'view',
+      nextSelectedPage = 1
+    ) => {
+      const safeSelectedPage = Math.max(
+        1,
+        Math.min(nextSelectedPage, Math.max(nextPageCount, 1))
+      );
+      setSecondaryBase64(nextBase64);
+      setSecondaryAnnotationState(nextAnnotations);
+      setActiveTool(nextMode);
+      setShowColorPicker(
+        nextMode === 'draw' || nextMode === 'highlight' || nextMode === 'marker'
+      );
+      setSecondaryTotalPages(nextPageCount);
+      setPageNumberInput(String(safeSelectedPage));
+      const dualPdf =
+        !!secondaryUri && documentType === 'pdf' && secondaryType === 'pdf';
+      setSecondaryViewerHtml(
+        buildViewerHtml(nextBase64, nextAnnotations, nextMode, safeSelectedPage, {
+          viewerSlot: 2,
+          crossPaneDragEnabled: dualPdf,
+          dualLayout,
+        })
+      );
+      setSecondaryViewerInstanceId((currentValue) => currentValue + 1);
+    },
+    [buildViewerHtml, documentType, dualLayout, secondaryType, secondaryUri]
   );
 
   const transitionOfficeExportToPdf = useCallback(
@@ -1664,7 +1785,12 @@ export default function EditPdfPage() {
       setNoteText('');
       setTotalPages(0);
       setPageNumberInput('1');
-      setViewerHtml(buildViewerHtml(pdfBase64, {}, 'view', 1));
+      setViewerHtml(
+        buildViewerHtml(pdfBase64, {}, 'view', 1, {
+          viewerSlot: 1,
+          crossPaneDragEnabled: false,
+        })
+      );
       setViewerInstanceId((currentValue) => currentValue + 1);
       resetOfficePreviewState();
       setShowPageEditorModal(false);
@@ -1674,8 +1800,9 @@ export default function EditPdfPage() {
     [buildViewerHtml, resetConversionState, resetOfficePreviewState]
   );
 
-  const sendCommand = useCallback((command) => {
-    if (!webViewRef.current) {
+  const injectCommandToSlot = useCallback((slot, command) => {
+    const ref = slot === 1 ? webViewRef : webViewRef2;
+    if (!ref.current) {
       return;
     }
 
@@ -1693,125 +1820,255 @@ export default function EditPdfPage() {
       true;
     `;
 
-    webViewRef.current.injectJavaScript(js);
+    ref.current.injectJavaScript(js);
   }, []);
 
-  const pickDocument = useCallback(async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: DOCUMENT_PICKER_TYPES,
-        copyToCacheDirectory: true,
-      });
+  const sendCommand = useCallback(
+    (command) => {
+      injectCommandToSlot(activePane, command);
+    },
+    [activePane, injectCommandToSlot]
+  );
 
-      if (result.canceled) {
+  const applyPickedAssetToSlot = useCallback(
+    async (slot, file, options = {}) => {
+      const { replaceAll = false } = options;
+      const extension = file.name.split('.').pop().toLowerCase();
+
+      if (slot === 2 && extension !== 'pdf') {
+        Alert.alert(
+          'Second window',
+          'The second viewer supports PDF files only so you can arrange two PDFs side by side and move pages between them.'
+        );
         return;
       }
 
-      const file = result.assets[0];
-      const extension = file.name.split('.').pop().toLowerCase();
-
       setLoading(true);
+      try {
+        if (extension === 'pdf') {
+          const fileInfo = await LegacyFileSystem.getInfoAsync(file.uri, { md5: true });
+          const nextDocumentKey =
+            fileInfo.md5 || `${file.name}-${fileInfo.size || Date.now()}`;
+          const [originalBase64, persistedAnnotations, workingPdfBase64] =
+            await Promise.all([
+              LegacyFileSystem.readAsStringAsync(file.uri, {
+                encoding: LegacyFileSystem.EncodingType.Base64,
+              }),
+              loadPersistedAnnotations(nextDocumentKey),
+              loadWorkingPdfCopy(nextDocumentKey),
+            ]);
+          const hasSavedEdits =
+            !!workingPdfBase64 || hasAnnotations(persistedAnnotations);
+          let nextAnnotations = persistedAnnotations;
+          let activeBase64 = workingPdfBase64 || originalBase64;
 
-      if (extension === 'pdf') {
-        const fileInfo = await LegacyFileSystem.getInfoAsync(file.uri, { md5: true });
-        const nextDocumentKey =
-          fileInfo.md5 || `${file.name}-${fileInfo.size || Date.now()}`;
-        const [originalBase64, persistedAnnotations, workingPdfBase64] = await Promise.all([
-          LegacyFileSystem.readAsStringAsync(file.uri, {
-            encoding: LegacyFileSystem.EncodingType.Base64,
-          }),
-          loadPersistedAnnotations(nextDocumentKey),
-          loadWorkingPdfCopy(nextDocumentKey),
-        ]);
-        const hasSavedEdits =
-          !!workingPdfBase64 || hasAnnotations(persistedAnnotations);
-        let nextAnnotations = persistedAnnotations;
-        let activeBase64 = workingPdfBase64 || originalBase64;
+          if (slot === 1 && hasSavedEdits) {
+            const resumeChoice = await promptForPdfResumeChoice(file.name);
 
-        if (hasSavedEdits) {
-          const resumeChoice = await promptForPdfResumeChoice(file.name);
+            if (resumeChoice === 'cancel') {
+              return;
+            }
 
-          if (resumeChoice === 'cancel') {
+            if (resumeChoice === 'reset') {
+              await annotationWriteQueueRef.current;
+              await clearPersistedPdfEditState(nextDocumentKey);
+              nextAnnotations = {};
+              activeBase64 = originalBase64;
+            }
+          } else if (slot === 2 && hasSavedEdits) {
+            await annotationWriteQueueRef.current;
+            activeBase64 = workingPdfBase64 || originalBase64;
+          }
+
+          if (slot === 1) {
+            if (replaceAll) {
+              clearSecondaryDocument();
+            }
+            setDocumentUri(file.uri);
+            setDocumentName(file.name);
+            setDocumentType(extension);
+            setDocumentKey(nextDocumentKey);
+            setBase64Data(activeBase64);
+            setTotalPages(0);
+            setTextNoteModal(null);
+            setNoteText('');
+            setActiveTool('view');
+            setActiveColor(DEFAULT_COLOR);
+            setShowColorPicker(false);
+            setShowToolbar(true);
+            setSelectedAnnotation(null);
+            setAnnotationState(nextAnnotations);
+            setViewerHtml(
+              buildViewerHtml(activeBase64, nextAnnotations, 'view', 1, {
+                viewerSlot: 1,
+                crossPaneDragEnabled: false,
+                dualLayout,
+              })
+            );
+            setViewerInstanceId((currentValue) => currentValue + 1);
+            setShowPageEditorModal(false);
+            setShowConvertModal(false);
+            setExportPageImageBusy(false);
+            pageImageExportRef.current.requestId = null;
+            resetConversionState();
+            resetOfficePreviewState();
+            setPageNumberInput('1');
+            setActivePane(1);
+          } else {
+            setSecondaryUri(file.uri);
+            setSecondaryName(file.name);
+            setSecondaryType(extension);
+            setSecondaryKey(nextDocumentKey);
+            setSecondaryBase64(activeBase64);
+            setSecondaryTotalPages(0);
+            setSecondaryAnnotationState(nextAnnotations);
+            setSecondaryViewerHtml(
+              buildViewerHtml(activeBase64, nextAnnotations, 'view', 1, {
+                viewerSlot: 2,
+                crossPaneDragEnabled: true,
+                dualLayout,
+              })
+            );
+            setSecondaryViewerInstanceId((v) => v + 1);
+            setActivePane(2);
+            if (documentType === 'pdf' && base64Data) {
+              const p = Number.parseInt(pageNumberInput, 10);
+              const curPage = Number.isInteger(p) && p > 0 ? p : 1;
+              setViewerHtml(
+                buildViewerHtml(base64Data, annotationState, activeTool, curPage, {
+                  viewerSlot: 1,
+                  crossPaneDragEnabled: true,
+                  dualLayout,
+                })
+              );
+              setViewerInstanceId((v) => v + 1);
+            }
+          }
+        } else {
+          if (slot === 2) {
             return;
           }
-
-          if (resumeChoice === 'reset') {
-            await annotationWriteQueueRef.current;
-            await clearPersistedPdfEditState(nextDocumentKey);
-            nextAnnotations = {};
-            activeBase64 = originalBase64;
+          if (replaceAll) {
+            clearSecondaryDocument();
           }
+          const shouldLoadPreviewBase64 = OFFICE_PREVIEW_TYPES.includes(extension);
+          const nextBase64 = shouldLoadPreviewBase64
+            ? await LegacyFileSystem.readAsStringAsync(file.uri, {
+                encoding: LegacyFileSystem.EncodingType.Base64,
+              })
+            : null;
+
+          setDocumentUri(file.uri);
+          setDocumentName(file.name);
+          setDocumentType(extension);
+          setDocumentKey(null);
+          setBase64Data(nextBase64);
+          setTotalPages(0);
+          setTextNoteModal(null);
+          setNoteText('');
+          setActiveTool('view');
+          setActiveColor(DEFAULT_COLOR);
+          setShowColorPicker(false);
+          setShowToolbar(true);
+          setSelectedAnnotation(null);
+          setAnnotationState({});
+          setViewerHtml(null);
+          setViewerInstanceId((currentValue) => currentValue + 1);
+          setShowPageEditorModal(false);
+          setShowConvertModal(false);
+          setExportPageImageBusy(false);
+          pageImageExportRef.current.requestId = null;
+          resetConversionState();
+          resetOfficePreviewState();
+          setPageNumberInput('1');
+          setActivePane(1);
+        }
+      } catch (error) {
+        Alert.alert('Error', 'Failed to load document: ' + error.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [
+      activeTool,
+      annotationState,
+      base64Data,
+      buildViewerHtml,
+      clearPersistedPdfEditState,
+      clearSecondaryDocument,
+      documentType,
+      loadPersistedAnnotations,
+      loadWorkingPdfCopy,
+      pageNumberInput,
+      promptForPdfResumeChoice,
+      resetConversionState,
+      resetOfficePreviewState,
+      dualLayout,
+    ]
+  );
+
+  const pickDocumentIntoSlot = useCallback(
+    async (slot, options = {}) => {
+      try {
+        const result = await DocumentPicker.getDocumentAsync({
+          type: DOCUMENT_PICKER_TYPES,
+          copyToCacheDirectory: true,
+        });
+
+        if (result.canceled) {
+          return;
         }
 
-        setDocumentUri(file.uri);
-        setDocumentName(file.name);
-        setDocumentType(extension);
-        setDocumentKey(nextDocumentKey);
-        setBase64Data(activeBase64);
-        setTotalPages(0);
-        setTextNoteModal(null);
-        setNoteText('');
-        setActiveTool('view');
-        setActiveColor(DEFAULT_COLOR);
-        setShowColorPicker(false);
-        setShowToolbar(true);
-        setSelectedAnnotation(null);
-        setAnnotationState(nextAnnotations);
-        setViewerHtml(buildViewerHtml(activeBase64, nextAnnotations, 'view', 1));
-        setViewerInstanceId((currentValue) => currentValue + 1);
-        setShowPageEditorModal(false);
-        setShowConvertModal(false);
-        setExportPageImageBusy(false);
-        pageImageExportRef.current.requestId = null;
-        resetConversionState();
-        resetOfficePreviewState();
-        setPageNumberInput('1');
-      } else {
-        const shouldLoadPreviewBase64 = OFFICE_PREVIEW_TYPES.includes(extension);
-        const nextBase64 = shouldLoadPreviewBase64
-          ? await LegacyFileSystem.readAsStringAsync(file.uri, {
-              encoding: LegacyFileSystem.EncodingType.Base64,
-            })
-          : null;
-
-        setDocumentUri(file.uri);
-        setDocumentName(file.name);
-        setDocumentType(extension);
-        setDocumentKey(null);
-        setBase64Data(nextBase64);
-        setTotalPages(0);
-        setTextNoteModal(null);
-        setNoteText('');
-        setActiveTool('view');
-        setActiveColor(DEFAULT_COLOR);
-        setShowColorPicker(false);
-        setShowToolbar(true);
-        setSelectedAnnotation(null);
-        setAnnotationState({});
-        setViewerHtml(null);
-        setViewerInstanceId((currentValue) => currentValue + 1);
-        setShowPageEditorModal(false);
-        setShowConvertModal(false);
-        setExportPageImageBusy(false);
-        pageImageExportRef.current.requestId = null;
-        resetConversionState();
-        resetOfficePreviewState();
-        setPageNumberInput('1');
+        await applyPickedAssetToSlot(slot, result.assets[0], options);
+      } catch (error) {
+        Alert.alert('Error', 'Failed to pick document: ' + error.message);
       }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to pick document: ' + error.message);
-    } finally {
-      setLoading(false);
+    },
+    [applyPickedAssetToSlot]
+  );
+
+  useEffect(() => {
+    const pending = consumePendingEditDocument();
+    if (!pending) {
+      return;
     }
-  }, [
-    buildViewerHtml,
-    clearPersistedPdfEditState,
-    loadPersistedAnnotations,
-    loadWorkingPdfCopy,
-    promptForPdfResumeChoice,
-    resetConversionState,
-    resetOfficePreviewState,
-  ]);
+    void applyPickedAssetToSlot(
+      1,
+      { uri: pending.uri, name: pending.name },
+      { replaceAll: true }
+    );
+  }, [applyPickedAssetToSlot]);
+
+  const openDocumentPicker = useCallback(() => {
+    if (!documentUri) {
+      pickDocumentIntoSlot(1);
+      return;
+    }
+    if (!secondaryUri) {
+      setShowOpenChoiceModal(true);
+      return;
+    }
+    Alert.alert(
+      'Two documents open',
+      'Close the second PDF, or replace everything with a new file.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Close second',
+          onPress: () => clearSecondaryDocument(),
+        },
+        {
+          text: 'New file',
+          onPress: () => {
+            clearSecondaryDocument();
+            pickDocumentIntoSlot(1, { replaceAll: true });
+          },
+        },
+      ]
+    );
+  }, [clearSecondaryDocument, documentUri, pickDocumentIntoSlot, secondaryUri]);
+
+  const pickDocument = openDocumentPicker;
 
   const copyDocument = useCallback(async () => {
     if (!documentUri) {
@@ -1838,7 +2095,7 @@ export default function EditPdfPage() {
     } catch (error) {
       Alert.alert('Error', 'Failed to copy: ' + error.message);
     }
-  }, [documentName, documentUri]);
+  }, [documentName, documentType, documentUri]);
 
   const shareDocument = useCallback(async () => {
     if (!documentUri) {
@@ -1876,9 +2133,15 @@ export default function EditPdfPage() {
   }, [buildEditedPdfFile, documentType, documentUri, promptForPdfShareChoice]);
 
   const runOfficePreviewExport = useCallback(() => {
-    if (!officePreviewMeta.canConvertToPdf || officePdfBusy) {
+    const canExport =
+      activePane === 1
+        ? officePreviewMeta.canConvertToPdf
+        : secondaryOfficeMeta.canConvertToPdf;
+    if (!canExport || officePdfBusy) {
       return;
     }
+
+    officeExportSlotRef.current = activePane;
 
     const requestId = Date.now().toString();
     officePreviewExportRef.current = {
@@ -1890,12 +2153,24 @@ export default function EditPdfPage() {
     sendCommand({
       command: 'exportPreview',
       requestId,
-      title: documentName,
+      title: activePane === 1 ? documentName : secondaryName,
     });
-  }, [documentName, officePdfBusy, officePreviewMeta.canConvertToPdf, sendCommand]);
+  }, [
+    activePane,
+    documentName,
+    officePdfBusy,
+    officePreviewMeta.canConvertToPdf,
+    secondaryName,
+    secondaryOfficeMeta.canConvertToPdf,
+    sendCommand,
+  ]);
 
   const promptSaveOfficeDocument = useCallback(() => {
-    if (!officePreviewMeta.canConvertToPdf || officePdfBusy) {
+    const canExport =
+      activePane === 1
+        ? officePreviewMeta.canConvertToPdf
+        : secondaryOfficeMeta.canConvertToPdf;
+    if (!canExport || officePdfBusy) {
       return;
     }
 
@@ -1933,7 +2208,13 @@ export default function EditPdfPage() {
         },
       ]
     );
-  }, [officePdfBusy, officePreviewMeta.canConvertToPdf, runOfficePreviewExport]);
+  }, [
+    activePane,
+    officePdfBusy,
+    officePreviewMeta.canConvertToPdf,
+    runOfficePreviewExport,
+    secondaryOfficeMeta.canConvertToPdf,
+  ]);
 
   const sendOfficePreviewCommand = useCallback(
     (payload) => {
@@ -2005,11 +2286,12 @@ export default function EditPdfPage() {
 
   const startPdfConversion = useCallback(
     async (formatId) => {
-      if (documentType !== 'pdf') {
+      const activePdfType = activePane === 1 ? documentType : secondaryType;
+      if (activePdfType !== 'pdf') {
         return;
       }
 
-      const formatConfig = PDF_CONVERSION_FORMATS.find(
+      const formatConfig = PdfConversionFormats.PDF_CONVERSION_FORMATS.find(
         (conversionFormat) => conversionFormat.id === formatId
       );
 
@@ -2022,8 +2304,9 @@ export default function EditPdfPage() {
         setConversionStatus('Preparing edited PDF...');
 
         const bakedPdfBase64 = await buildEditedPdfBase64();
+        const exportBaseName = activePane === 1 ? documentName : secondaryName;
         const outputFileName = buildConvertedFileName(
-          documentName,
+          exportBaseName,
           formatConfig.extension
         );
 
@@ -2050,11 +2333,22 @@ export default function EditPdfPage() {
         Alert.alert('Conversion Failed', error.message);
       }
     },
-    [buildEditedPdfBase64, documentName, documentType, resetConversionState]
+    [
+      activePane,
+      buildEditedPdfBase64,
+      documentName,
+      documentType,
+      resetConversionState,
+      secondaryName,
+      secondaryType,
+    ]
   );
 
   const finalizeOfficePreviewPdfExport = useCallback(
     async (html, mode = 'copy') => {
+      const exportLabel =
+        officeExportSlotRef.current === 2 ? secondaryName : documentName;
+
       const printResult = await Print.printToFileAsync({
         html,
       });
@@ -2067,7 +2361,7 @@ export default function EditPdfPage() {
 
       if (mode === 'replace') {
         const stripped =
-          documentName.replace(/\.[^/.]+$/, '') || documentName || 'document';
+          exportLabel.replace(/\.[^/.]+$/, '') || exportLabel || 'document';
         const pdfFileName = `${sanitizeFileSegment(stripped)}.pdf`;
         const outputUri = `${Paths.document.uri}${pdfFileName}`;
 
@@ -2111,7 +2405,7 @@ export default function EditPdfPage() {
         return;
       }
 
-      const convertedFileName = buildConvertedFileName(documentName, 'pdf');
+      const convertedFileName = buildConvertedFileName(exportLabel, 'pdf');
       const outputUri = `${Paths.document.uri}${convertedFileName}`;
 
       await LegacyFileSystem.writeAsStringAsync(outputUri, convertedPdfBase64, {
@@ -2148,7 +2442,7 @@ export default function EditPdfPage() {
         { text: 'OK' },
       ]);
     },
-    [documentName, transitionOfficeExportToPdf]
+    [documentName, secondaryName, transitionOfficeExportToPdf]
   );
 
   const handleConverterMessage = useCallback(
@@ -2303,7 +2597,8 @@ export default function EditPdfPage() {
   const getValidatedPageNumber = useCallback(
     (allowInsertAfterLast = false) => {
       const parsedPageNumber = Number.parseInt(pageNumberInput, 10);
-      const upperBound = allowInsertAfterLast ? totalPages : totalPages;
+      const tp = activePane === 1 ? totalPages : secondaryTotalPages;
+      const upperBound = allowInsertAfterLast ? tp : tp;
 
       if (!Number.isInteger(parsedPageNumber)) {
         Alert.alert(
@@ -2323,87 +2618,229 @@ export default function EditPdfPage() {
 
       return parsedPageNumber;
     },
-    [pageNumberInput, totalPages]
+    [activePane, pageNumberInput, secondaryTotalPages, totalPages]
+  );
+
+  const removePdfPageAt = useCallback(
+    async (pane, pageNumber) => {
+      const isPrimary = pane === 1;
+      const pdfBase64 = isPrimary ? base64Data : secondaryBase64;
+      const pdfKey = isPrimary ? documentKey : secondaryKey;
+      const pdfAnnotations = isPrimary ? annotationState : secondaryAnnotationState;
+      const tp = isPrimary ? totalPages : secondaryTotalPages;
+
+      if (!pageNumber || !pdfBase64 || !pdfKey) {
+        return;
+      }
+
+      if (tp <= 1) {
+        Alert.alert('Cannot Remove Page', 'A PDF must keep at least one page.');
+        return;
+      }
+
+      try {
+        setPageEditorBusy(true);
+        const pdfDocument = await PDFDocument.load(pdfBase64);
+        pdfDocument.removePage(pageNumber - 1);
+
+        const nextAnnotations = removePageFromAnnotationState(pdfAnnotations, pageNumber);
+        const nextBase64 = await pdfDocument.saveAsBase64();
+        const nextPageCount = pdfDocument.getPageCount();
+        const nextSelectedPage = Math.max(1, Math.min(pageNumber, nextPageCount));
+
+        await annotationWriteQueueRef.current;
+        await writeWorkingPdfCopy(pdfKey, nextBase64);
+        await writeAnnotationSnapshot(pdfKey, nextAnnotations);
+        if (isPrimary) {
+          applyPdfEditorState(
+            nextBase64,
+            nextAnnotations,
+            nextPageCount,
+            'view',
+            nextSelectedPage
+          );
+        } else {
+          applySecondaryPdfEditorState(
+            nextBase64,
+            nextAnnotations,
+            nextPageCount,
+            'view',
+            nextSelectedPage
+          );
+        }
+        setShowPageEditorModal(false);
+      } catch (error) {
+        Alert.alert('Page Update Failed', error.message);
+      } finally {
+        setPageEditorBusy(false);
+      }
+    },
+    [
+      annotationState,
+      applyPdfEditorState,
+      applySecondaryPdfEditorState,
+      base64Data,
+      documentKey,
+      secondaryAnnotationState,
+      secondaryBase64,
+      secondaryKey,
+      secondaryTotalPages,
+      totalPages,
+      writeAnnotationSnapshot,
+      writeWorkingPdfCopy,
+    ]
   );
 
   const removePdfPage = useCallback(async () => {
     const pageNumber = getValidatedPageNumber(false);
-    if (!pageNumber || !base64Data || !documentKey) {
+    if (!pageNumber) {
       return;
     }
+    await removePdfPageAt(activePane, pageNumber);
+  }, [activePane, getValidatedPageNumber, removePdfPageAt]);
 
-    if (totalPages <= 1) {
-      Alert.alert('Cannot Remove Page', 'A PDF must keep at least one page.');
-      return;
-    }
+  const reorderPdfPageInPane = useCallback(
+    async (slot, fromPage, toAfterPage) => {
+      const isPrimary = slot === 1;
+      const pdfBase64 = isPrimary ? base64Data : secondaryBase64;
+      const pdfKey = isPrimary ? documentKey : secondaryKey;
+      const pdfAnnotations = isPrimary ? annotationState : secondaryAnnotationState;
+      const tp = isPrimary ? totalPages : secondaryTotalPages;
 
-    try {
-      setPageEditorBusy(true);
-      const pdfDocument = await PDFDocument.load(base64Data);
-      pdfDocument.removePage(pageNumber - 1);
+      if (
+        !pdfBase64 ||
+        !pdfKey ||
+        !Number.isInteger(fromPage) ||
+        !Number.isInteger(toAfterPage) ||
+        fromPage < 1 ||
+        toAfterPage < 1 ||
+        fromPage > tp ||
+        toAfterPage > tp
+      ) {
+        return;
+      }
+      if (fromPage === toAfterPage || tp <= 1) {
+        return;
+      }
 
-      const nextAnnotations = removePageFromAnnotationState(annotationState, pageNumber);
-      const nextBase64 = await pdfDocument.saveAsBase64();
-      const nextPageCount = pdfDocument.getPageCount();
-      const nextSelectedPage = Math.max(1, Math.min(pageNumber, nextPageCount));
+      try {
+        setPageEditorBusy(true);
+        const pdfDocument = await PDFDocument.load(pdfBase64);
+        const fromIdx = fromPage - 1;
+        let insertAt = toAfterPage;
+        const [copied] = await pdfDocument.copyPages(pdfDocument, [fromIdx]);
+        pdfDocument.removePage(fromIdx);
+        if (fromIdx < insertAt) {
+          insertAt -= 1;
+        }
+        pdfDocument.insertPage(insertAt, copied);
 
-      await annotationWriteQueueRef.current;
-      await writeWorkingPdfCopy(documentKey, nextBase64);
-      await writeAnnotationSnapshot(documentKey, nextAnnotations);
-      applyPdfEditorState(
-        nextBase64,
-        nextAnnotations,
-        nextPageCount,
-        'view',
-        nextSelectedPage
-      );
-      setShowPageEditorModal(false);
-    } catch (error) {
-      Alert.alert('Page Update Failed', error.message);
-    } finally {
-      setPageEditorBusy(false);
-    }
-  }, [
-    annotationState,
-    applyPdfEditorState,
-    base64Data,
-    documentKey,
-    getValidatedPageNumber,
-    totalPages,
-    writeAnnotationSnapshot,
-    writeWorkingPdfCopy,
-  ]);
+        const nextAnnotations = reorderPageInAnnotationState(
+          pdfAnnotations,
+          fromPage,
+          toAfterPage,
+          tp
+        );
+        const nextBase64 = await pdfDocument.saveAsBase64();
+        const nextPageCount = pdfDocument.getPageCount();
+
+        const order = [];
+        for (let p = 1; p <= tp; p += 1) {
+          order.push(p);
+        }
+        const fi = order.indexOf(fromPage);
+        order.splice(fi, 1);
+        const ai = order.indexOf(toAfterPage);
+        order.splice(ai === -1 ? order.length : ai + 1, 0, fromPage);
+        const newSelectedPage = order.indexOf(fromPage) + 1;
+
+        await annotationWriteQueueRef.current;
+        await writeWorkingPdfCopy(pdfKey, nextBase64);
+        await writeAnnotationSnapshot(pdfKey, nextAnnotations);
+        if (isPrimary) {
+          applyPdfEditorState(
+            nextBase64,
+            nextAnnotations,
+            nextPageCount,
+            'view',
+            newSelectedPage
+          );
+        } else {
+          applySecondaryPdfEditorState(
+            nextBase64,
+            nextAnnotations,
+            nextPageCount,
+            'view',
+            newSelectedPage
+          );
+        }
+      } catch (error) {
+        Alert.alert('Reorder Failed', error.message);
+      } finally {
+        setPageEditorBusy(false);
+      }
+    },
+    [
+      annotationState,
+      applyPdfEditorState,
+      applySecondaryPdfEditorState,
+      base64Data,
+      documentKey,
+      secondaryAnnotationState,
+      secondaryBase64,
+      secondaryKey,
+      secondaryTotalPages,
+      totalPages,
+      writeAnnotationSnapshot,
+      writeWorkingPdfCopy,
+    ]
+  );
 
   const insertBlankPdfPage = useCallback(async () => {
     const pageNumber = getValidatedPageNumber(true);
-    if (!pageNumber || !base64Data || !documentKey) {
+    const isPrimary = activePane === 1;
+    const pdfBase64 = isPrimary ? base64Data : secondaryBase64;
+    const pdfKey = isPrimary ? documentKey : secondaryKey;
+    const pdfAnnotations = isPrimary ? annotationState : secondaryAnnotationState;
+
+    if (!pageNumber || !pdfBase64 || !pdfKey) {
       return;
     }
 
     try {
       setPageEditorBusy(true);
-      const pdfDocument = await PDFDocument.load(base64Data);
+      const pdfDocument = await PDFDocument.load(pdfBase64);
       const pages = pdfDocument.getPages();
       const referencePage = pages[Math.min(pageNumber - 1, pages.length - 1)];
       const { width, height } = referencePage.getSize();
 
       pdfDocument.insertPage(pageNumber, [width, height]);
 
-      const nextAnnotations = insertPageIntoAnnotationState(annotationState, pageNumber);
+      const nextAnnotations = insertPageIntoAnnotationState(pdfAnnotations, pageNumber);
       const nextBase64 = await pdfDocument.saveAsBase64();
       const nextPageCount = pdfDocument.getPageCount();
       const nextSelectedPage = Math.min(pageNumber + 1, nextPageCount);
 
       await annotationWriteQueueRef.current;
-      await writeWorkingPdfCopy(documentKey, nextBase64);
-      await writeAnnotationSnapshot(documentKey, nextAnnotations);
-      applyPdfEditorState(
-        nextBase64,
-        nextAnnotations,
-        nextPageCount,
-        'view',
-        nextSelectedPage
-      );
+      await writeWorkingPdfCopy(pdfKey, nextBase64);
+      await writeAnnotationSnapshot(pdfKey, nextAnnotations);
+      if (isPrimary) {
+        applyPdfEditorState(
+          nextBase64,
+          nextAnnotations,
+          nextPageCount,
+          'view',
+          nextSelectedPage
+        );
+      } else {
+        applySecondaryPdfEditorState(
+          nextBase64,
+          nextAnnotations,
+          nextPageCount,
+          'view',
+          nextSelectedPage
+        );
+      }
       setShowPageEditorModal(false);
     } catch (error) {
       Alert.alert('Page Insert Failed', error.message);
@@ -2411,18 +2848,28 @@ export default function EditPdfPage() {
       setPageEditorBusy(false);
     }
   }, [
+    activePane,
     annotationState,
     applyPdfEditorState,
+    applySecondaryPdfEditorState,
     base64Data,
     documentKey,
     getValidatedPageNumber,
+    secondaryAnnotationState,
+    secondaryBase64,
+    secondaryKey,
     writeAnnotationSnapshot,
     writeWorkingPdfCopy,
   ]);
 
   const insertImagePdfPage = useCallback(async () => {
     const pageNumber = getValidatedPageNumber(true);
-    if (!pageNumber || !base64Data || !documentKey) {
+    const isPrimary = activePane === 1;
+    const pdfBase64 = isPrimary ? base64Data : secondaryBase64;
+    const pdfKey = isPrimary ? documentKey : secondaryKey;
+    const pdfAnnotations = isPrimary ? annotationState : secondaryAnnotationState;
+
+    if (!pageNumber || !pdfBase64 || !pdfKey) {
       return;
     }
 
@@ -2449,7 +2896,7 @@ export default function EditPdfPage() {
         return;
       }
 
-      const pdfDocument = await PDFDocument.load(base64Data);
+      const pdfDocument = await PDFDocument.load(pdfBase64);
       const pages = pdfDocument.getPages();
       const referencePage = pages[Math.min(pageNumber - 1, pages.length - 1)];
       const { width, height } = referencePage.getSize();
@@ -2477,21 +2924,31 @@ export default function EditPdfPage() {
         height: drawHeight,
       });
 
-      const nextAnnotations = insertPageIntoAnnotationState(annotationState, pageNumber);
+      const nextAnnotations = insertPageIntoAnnotationState(pdfAnnotations, pageNumber);
       const nextBase64 = await pdfDocument.saveAsBase64();
       const nextPageCount = pdfDocument.getPageCount();
       const nextSelectedPage = Math.min(pageNumber + 1, nextPageCount);
 
       await annotationWriteQueueRef.current;
-      await writeWorkingPdfCopy(documentKey, nextBase64);
-      await writeAnnotationSnapshot(documentKey, nextAnnotations);
-      applyPdfEditorState(
-        nextBase64,
-        nextAnnotations,
-        nextPageCount,
-        'view',
-        nextSelectedPage
-      );
+      await writeWorkingPdfCopy(pdfKey, nextBase64);
+      await writeAnnotationSnapshot(pdfKey, nextAnnotations);
+      if (isPrimary) {
+        applyPdfEditorState(
+          nextBase64,
+          nextAnnotations,
+          nextPageCount,
+          'view',
+          nextSelectedPage
+        );
+      } else {
+        applySecondaryPdfEditorState(
+          nextBase64,
+          nextAnnotations,
+          nextPageCount,
+          'view',
+          nextSelectedPage
+        );
+      }
       setShowPageEditorModal(false);
     } catch (error) {
       Alert.alert('Image Page Failed', error.message);
@@ -2499,24 +2956,243 @@ export default function EditPdfPage() {
       setPageEditorBusy(false);
     }
   }, [
+    activePane,
     annotationState,
     applyPdfEditorState,
+    applySecondaryPdfEditorState,
     base64Data,
     documentKey,
     getValidatedPageNumber,
+    secondaryAnnotationState,
+    secondaryBase64,
+    secondaryKey,
     writeAnnotationSnapshot,
     writeWorkingPdfCopy,
   ]);
 
+  const performPdfPageTransfer = useCallback(
+    async ({
+      srcPane,
+      tgtPane,
+      srcPage,
+      insertBefore,
+      mode,
+      closeModal = true,
+    }) => {
+      if (!secondaryUri || documentType !== 'pdf' || secondaryType !== 'pdf') {
+        Alert.alert(
+          'Page transfer',
+          'Open two PDF files (use Import → Add second document) to move or copy pages between them.'
+        );
+        return;
+      }
+
+      if (srcPane === tgtPane) {
+        Alert.alert('Page transfer', 'Pick two different documents.');
+        return;
+      }
+
+      const tgtCount = tgtPane === 1 ? totalPages : secondaryTotalPages;
+
+      if (!Number.isInteger(srcPage) || srcPage < 1) {
+        Alert.alert('Invalid', 'Enter a valid source page number.');
+        return;
+      }
+
+      if (
+        !Number.isInteger(insertBefore) ||
+        insertBefore < 1 ||
+        insertBefore > tgtCount + 1
+      ) {
+        Alert.alert(
+          'Invalid',
+          `Insert position must be between 1 and ${tgtCount + 1} (before that page, or last+1 to append).`
+        );
+        return;
+      }
+
+      const srcBase64 = srcPane === 1 ? base64Data : secondaryBase64;
+      const tgtBase64 = tgtPane === 1 ? base64Data : secondaryBase64;
+      const srcKey = srcPane === 1 ? documentKey : secondaryKey;
+      const tgtKey = tgtPane === 1 ? documentKey : secondaryKey;
+      let srcAnn = srcPane === 1 ? annotationState : secondaryAnnotationState;
+      let tgtAnn = tgtPane === 1 ? annotationState : secondaryAnnotationState;
+
+      if (!srcBase64 || !tgtBase64 || !srcKey || !tgtKey) {
+        return;
+      }
+
+      try {
+        setPageTransferBusy(true);
+        const srcPdf = await PDFDocument.load(srcBase64);
+        const tgtPdf = await PDFDocument.load(tgtBase64);
+
+        if (srcPage > srcPdf.getPageCount()) {
+          Alert.alert('Invalid', 'Source page does not exist.');
+          return;
+        }
+
+        const srcIndex = srcPage - 1;
+        const insertIndex = insertBefore - 1;
+        const [copied] = await tgtPdf.copyPages(srcPdf, [srcIndex]);
+        tgtPdf.insertPage(insertIndex, copied);
+
+        let nextSrcBase64 = srcBase64;
+        if (mode === 'move') {
+          if (srcPdf.getPageCount() <= 1) {
+            Alert.alert('Cannot move', 'The source PDF must keep at least one page.');
+            return;
+          }
+          srcPdf.removePage(srcIndex);
+          nextSrcBase64 = await srcPdf.saveAsBase64();
+          srcAnn = removePageFromAnnotationState(srcAnn, srcPage);
+        }
+
+        const nextTgtBase64 = await tgtPdf.saveAsBase64();
+        const tgtInsertAfter = insertBefore - 1;
+        tgtAnn = insertPageIntoAnnotationState(tgtAnn, tgtInsertAfter);
+
+        const nextTgtCount = tgtPdf.getPageCount();
+
+        await annotationWriteQueueRef.current;
+
+        if (mode === 'move') {
+          const nextSrcCount = srcPdf.getPageCount();
+          if (srcPane === 1) {
+            await writeWorkingPdfCopy(srcKey, nextSrcBase64);
+            await writeAnnotationSnapshot(srcKey, srcAnn);
+            applyPdfEditorState(
+              nextSrcBase64,
+              srcAnn,
+              nextSrcCount,
+              'view',
+              Math.min(srcPage, nextSrcCount)
+            );
+          } else {
+            await writeWorkingPdfCopy(srcKey, nextSrcBase64);
+            await writeAnnotationSnapshot(srcKey, srcAnn);
+            applySecondaryPdfEditorState(
+              nextSrcBase64,
+              srcAnn,
+              nextSrcCount,
+              'view',
+              Math.min(srcPage, nextSrcCount)
+            );
+          }
+        }
+
+        if (tgtPane === 1) {
+          await writeWorkingPdfCopy(tgtKey, nextTgtBase64);
+          await writeAnnotationSnapshot(tgtKey, tgtAnn);
+          applyPdfEditorState(
+            nextTgtBase64,
+            tgtAnn,
+            nextTgtCount,
+            'view',
+            Math.min(insertBefore, nextTgtCount)
+          );
+        } else {
+          await writeWorkingPdfCopy(tgtKey, nextTgtBase64);
+          await writeAnnotationSnapshot(tgtKey, tgtAnn);
+          applySecondaryPdfEditorState(
+            nextTgtBase64,
+            tgtAnn,
+            nextTgtCount,
+            'view',
+            Math.min(insertBefore, nextTgtCount)
+          );
+        }
+
+        if (closeModal) {
+          setShowPageTransferModal(false);
+        }
+        setCrossPdfDropBanner(false);
+        crossPdfDropPendingRef.current = null;
+        Alert.alert(
+          'Done',
+          mode === 'move'
+            ? 'Page moved. Annotations were adjusted where possible; review both PDFs.'
+            : 'Page copied into the target PDF. Annotations on the new page start empty.'
+        );
+      } catch (error) {
+        Alert.alert('Transfer failed', error?.message || 'Could not transfer page.');
+      } finally {
+        setPageTransferBusy(false);
+      }
+    },
+    [
+      annotationState,
+      applyPdfEditorState,
+      applySecondaryPdfEditorState,
+      base64Data,
+      documentKey,
+      documentType,
+      secondaryAnnotationState,
+      secondaryBase64,
+      secondaryKey,
+      secondaryTotalPages,
+      secondaryType,
+      secondaryUri,
+      totalPages,
+      writeAnnotationSnapshot,
+      writeWorkingPdfCopy,
+    ]
+  );
+
+  const executePdfPageTransfer = useCallback(async () => {
+    await performPdfPageTransfer({
+      srcPane: pageTransferSourcePane,
+      tgtPane: pageTransferTargetPane,
+      srcPage: Number.parseInt(pageTransferSourcePage, 10),
+      insertBefore: Number.parseInt(pageTransferInsertBefore, 10),
+      mode: pageTransferMode,
+      closeModal: true,
+    });
+  }, [
+    pageTransferInsertBefore,
+    pageTransferMode,
+    pageTransferSourcePage,
+    pageTransferSourcePane,
+    pageTransferTargetPane,
+    performPdfPageTransfer,
+  ]);
+
+  const cancelCrossPdfDrop = useCallback(() => {
+    crossPdfDropPendingRef.current = null;
+    setCrossPdfDropBanner(false);
+  }, []);
+
+  const appendCrossPdfPageToOtherEnd = useCallback(() => {
+    const p = crossPdfDropPendingRef.current;
+    if (!p || !secondaryUri) {
+      return;
+    }
+    const tgtPane = p.sourcePane === 1 ? 2 : 1;
+    const tgtCount = tgtPane === 1 ? totalPages : secondaryTotalPages;
+    const mode = p.mode === 'move' ? 'move' : 'copy';
+    crossPdfDropPendingRef.current = null;
+    setCrossPdfDropBanner(false);
+    void performPdfPageTransfer({
+      srcPane: p.sourcePane,
+      tgtPane,
+      srcPage: p.sourcePage,
+      insertBefore: tgtCount + 1,
+      mode,
+      closeModal: false,
+    });
+  }, [performPdfPageTransfer, secondaryUri, secondaryTotalPages, totalPages]);
+
   const exportPdfPageAsImage = useCallback(
     (format) => {
-      if (documentType !== 'pdf' || exportPageImageBusy || pageEditorBusy) {
+      const activePdf = activePane === 1 ? documentType : secondaryType;
+      if (activePdf !== 'pdf' || exportPageImageBusy || pageEditorBusy) {
         return;
       }
       const pageNumber = getValidatedPageNumber(false);
       if (!pageNumber) {
         return;
       }
+      exportContextPaneRef.current = activePane;
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
       pageImageExportRef.current.requestId = requestId;
       setExportPageImageBusy(true);
@@ -2531,63 +3207,110 @@ export default function EditPdfPage() {
       });
     },
     [
+      activePane,
       documentType,
       exportPageImageBusy,
       getValidatedPageNumber,
       pageEditorBusy,
+      secondaryType,
       sendCommand,
     ]
   );
 
+  const runSaveAnnotatedPdfForPane = useCallback(
+    async (pane) => {
+      const pdfType = pane === 1 ? documentType : secondaryType;
+      if (pdfType !== 'pdf') {
+        return;
+      }
+
+      try {
+        setSavingAnnotatedPdf(true);
+        const { bakedPdfBase64, fileName, outputUri } = await buildEditedPdfFile(
+          Paths.document.uri,
+          pane
+        );
+
+        const deviceSaveResult =
+          Platform.OS === 'android'
+            ? await savePdfToAndroidDeviceFolder(bakedPdfBase64, fileName)
+            : { savedToDevice: false, reason: 'unsupported_platform' };
+
+        const canShare = await Sharing.isAvailableAsync();
+        const saveSummary = [`Saved in app storage as ${fileName}.`];
+
+        if (deviceSaveResult.savedToDevice) {
+          saveSummary.push(
+            'A second copy was also saved to the folder you picked on your phone.'
+          );
+        } else if (Platform.OS === 'android') {
+          saveSummary.push(
+            'The visible device copy was not created. Next time, allow the folder picker to save directly into phone storage.'
+          );
+        }
+
+        Alert.alert('Annotated PDF Saved', saveSummary.join(' '), [
+          ...(canShare
+            ? [
+                {
+                  text: 'Share',
+                  onPress: () => Sharing.shareAsync(outputUri),
+                },
+              ]
+            : []),
+          { text: 'OK' },
+        ]);
+      } catch (error) {
+        Alert.alert(
+          'Save Failed',
+          'Could not save the annotated PDF: ' + error.message
+        );
+      } finally {
+        setSavingAnnotatedPdf(false);
+      }
+    },
+    [buildEditedPdfFile, documentType, secondaryType]
+  );
+
   const saveAnnotatedPdf = useCallback(async () => {
-    if (documentType !== 'pdf') {
+    const activePdfType = activePane === 1 ? documentType : secondaryType;
+    if (activePdfType !== 'pdf') {
       return;
     }
 
-    try {
-      setSavingAnnotatedPdf(true);
-      const { bakedPdfBase64, fileName, outputUri } = await buildEditedPdfFile(
-        Paths.document.uri
-      );
-
-      const deviceSaveResult =
-        Platform.OS === 'android'
-          ? await savePdfToAndroidDeviceFolder(bakedPdfBase64, fileName)
-          : { savedToDevice: false, reason: 'unsupported_platform' };
-
-      const canShare = await Sharing.isAvailableAsync();
-      const saveSummary = [`Saved in app storage as ${fileName}.`];
-
-      if (deviceSaveResult.savedToDevice) {
-        saveSummary.push(
-          'A second copy was also saved to the folder you picked on your phone.'
-        );
-      } else if (Platform.OS === 'android') {
-        saveSummary.push(
-          'The visible device copy was not created. Next time, allow the folder picker to save directly into phone storage.'
-        );
-      }
-
-      Alert.alert('Annotated PDF Saved', saveSummary.join(' '), [
-        ...(canShare
-          ? [
-              {
-                text: 'Share',
-                onPress: () => Sharing.shareAsync(outputUri),
-              },
-            ]
-          : []),
-        { text: 'OK' },
+    const dualPdf =
+      secondaryUri && documentType === 'pdf' && secondaryType === 'pdf';
+    if (dualPdf) {
+      const label1 = documentName?.trim() || 'First PDF';
+      const label2 = secondaryName?.trim() || 'Second PDF';
+      Alert.alert('Save annotated PDF', 'Which document should be saved?', [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: label1,
+          onPress: () => {
+            void runSaveAnnotatedPdfForPane(1);
+          },
+        },
+        {
+          text: label2,
+          onPress: () => {
+            void runSaveAnnotatedPdfForPane(2);
+          },
+        },
       ]);
-    } catch (error) {
-      Alert.alert(
-        'Save Failed',
-        'Could not save the annotated PDF: ' + error.message
-      );
-    } finally {
-      setSavingAnnotatedPdf(false);
+      return;
     }
-  }, [buildEditedPdfFile, documentType]);
+
+    await runSaveAnnotatedPdfForPane(activePane);
+  }, [
+    activePane,
+    documentName,
+    documentType,
+    runSaveAnnotatedPdfForPane,
+    secondaryName,
+    secondaryType,
+    secondaryUri,
+  ]);
 
   const saveTextDocumentToDevice = useCallback(async () => {
     if (!documentUri || !TEXT_FILE_EXTENSIONS.includes(documentType)) {
@@ -2654,60 +3377,135 @@ export default function EditPdfPage() {
     }
   }, [documentName, documentType, documentUri]);
 
-  const handleWebViewMessage = useCallback(
-    (event) => {
-      try {
-        const data = JSON.parse(event.nativeEvent.data);
+  const processViewerMessage = useCallback(
+    (data, slot) => {
+      const isPrimary = slot === 1;
 
-        switch (data.type) {
-          case 'pdfLoaded':
+      switch (data.type) {
+        case 'pdfLoaded':
+          if (isPrimary) {
             setTotalPages(data.totalPages);
-            sendCommand({ command: 'setMode', mode: activeTool });
-            sendCommand({ command: 'setDrawColor', color: activeColor });
-            sendCommand({
-              command: 'setHighlightColor',
-              color: activeColor + HIGHLIGHT_ALPHA_HEX,
-            });
-            sendCommand({ command: 'setDrawBrushWidth', px: drawBrushPx });
-            sendCommand({ command: 'setMarkerBrushWidth', px: markerBrushPx });
+          } else {
+            setSecondaryTotalPages(data.totalPages);
+          }
+          injectCommandToSlot(slot, { command: 'setMode', mode: activeTool });
+          injectCommandToSlot(slot, { command: 'setDrawColor', color: activeColor });
+          injectCommandToSlot(slot, {
+            command: 'setHighlightColor',
+            color: activeColor + HIGHLIGHT_ALPHA_HEX,
+          });
+          injectCommandToSlot(slot, { command: 'setDrawBrushWidth', px: drawBrushPx });
+          injectCommandToSlot(slot, { command: 'setMarkerBrushWidth', px: markerBrushPx });
+          break;
+        case 'requestTextInput':
+          setActivePane(slot);
+          setTextNoteModal({ page: data.page, x: data.x, y: data.y });
+          setNoteText('');
+          break;
+        case 'annotationSelected':
+          setSelectedAnnotation(data.annotation || null);
+          break;
+        case 'crossPdfPickSource':
+          if (
+            data.slot &&
+            Number.isInteger(data.page) &&
+            secondaryUri &&
+            documentType === 'pdf' &&
+            secondaryType === 'pdf'
+          ) {
+            crossPdfDropPendingRef.current = {
+              sourcePane: data.slot,
+              sourcePage: data.page,
+              mode: crossPdfDropMode === 'move' ? 'move' : 'copy',
+            };
+            setCrossPdfDropBanner(true);
+            setActivePane(data.slot);
+          }
+          break;
+        case 'pageReorderDrag':
+          if (
+            data.slot &&
+            Number.isInteger(data.fromPage) &&
+            Number.isInteger(data.toAfterPage)
+          ) {
+            void reorderPdfPageInPane(data.slot, data.fromPage, data.toAfterPage);
+          }
+          break;
+        case 'pageMenuAction':
+          if (!data.slot || !Number.isInteger(data.page)) {
             break;
-          case 'requestTextInput':
-            setTextNoteModal({ page: data.page, x: data.x, y: data.y });
-            setNoteText('');
-            break;
-          case 'annotationSelected':
-            setSelectedAnnotation(data.annotation || null);
-            break;
-          case 'pageSelected':
-            if (Number.isInteger(data.page)) {
-              setPageNumberInput(String(data.page));
-            }
-            break;
-          case 'pageLongPressed':
-            if (Number.isInteger(data.page)) {
-              setPageNumberInput(String(data.page));
-            }
+          }
+          setActivePane(data.slot);
+          if (data.action === 'editPages') {
+            setPageNumberInput(String(data.page));
             setShowPageEditorModal(true);
-            break;
-          case 'pageExportImageReady':
-            if (data.requestId !== pageImageExportRef.current.requestId) {
-              break;
+          } else if (data.action === 'removePage') {
+            Alert.alert(
+              'Remove page',
+              `Remove page ${data.page} from this document?`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Remove',
+                  style: 'destructive',
+                  onPress: () => {
+                    void removePdfPageAt(data.slot, data.page);
+                  },
+                },
+              ]
+            );
+          }
+          break;
+        case 'pageSelected':
+          setActivePane(slot);
+          if (Number.isInteger(data.page)) {
+            setPageNumberInput(String(data.page));
+          }
+          if (crossPdfDropPendingRef.current) {
+            const pending = crossPdfDropPendingRef.current;
+            if (slot === pending.sourcePane) {
+              crossPdfDropPendingRef.current = null;
+              setCrossPdfDropBanner(false);
+            } else {
+              const insertAfterPage = data.page;
+              const insertBefore = insertAfterPage + 1;
+              const mode = pending.mode === 'move' ? 'move' : 'copy';
+              crossPdfDropPendingRef.current = null;
+              setCrossPdfDropBanner(false);
+              void performPdfPageTransfer({
+                srcPane: pending.sourcePane,
+                tgtPane: slot,
+                srcPage: pending.sourcePage,
+                insertBefore,
+                mode,
+                closeModal: false,
+              });
             }
-            pageImageExportRef.current.requestId = null;
-            setExportPageImageBusy(false);
-            (async () => {
-              try {
-                const page = Number(data.page) || 1;
-                const mime = data.mimeType || 'image/png';
-                const ext =
-                  mime === 'image/jpeg' || mime === 'image/jpg'
-                    ? 'jpg'
-                    : mime === 'image/webp'
-                      ? 'webp'
-                      : 'png';
-                const rawBase = (documentName || 'document').replace(/\.[^/.]+$/, '');
-                const safeBase =
-                  rawBase.replace(/[^\w\-]+/g, '_').slice(0, 72) || 'document';
+          }
+          break;
+        case 'pageLongPressed':
+          break;
+        case 'pageExportImageReady':
+          if (data.requestId !== pageImageExportRef.current.requestId) {
+            break;
+          }
+          pageImageExportRef.current.requestId = null;
+          setExportPageImageBusy(false);
+          (async () => {
+            try {
+              const page = Number(data.page) || 1;
+              const mime = data.mimeType || 'image/png';
+              const ext =
+                mime === 'image/jpeg' || mime === 'image/jpg'
+                  ? 'jpg'
+                  : mime === 'image/webp'
+                    ? 'webp'
+                    : 'png';
+              const srcName =
+                exportContextPaneRef.current === 2 ? secondaryName : documentName;
+              const rawBase = (srcName || 'document').replace(/\.[^/.]+$/, '');
+              const safeBase =
+                rawBase.replace(/[^\w\-]+/g, '_').slice(0, 72) || 'document';
                 const fileName = `${safeBase}_page_${page}.${ext}`;
                 const outputUri = `${Paths.cache.uri}${fileName}`;
                 await LegacyFileSystem.writeAsStringAsync(outputUri, data.base64, {
@@ -2763,151 +3561,240 @@ export default function EditPdfPage() {
               }
             })();
             break;
-          case 'pageExportImageError':
-            if (data.requestId !== pageImageExportRef.current.requestId) {
-              break;
-            }
-            pageImageExportRef.current.requestId = null;
-            setExportPageImageBusy(false);
-            Alert.alert(
-              'Export failed',
-              data.message || 'Could not export this page as an image.'
-            );
+        case 'pageExportImageError':
+          if (data.requestId !== pageImageExportRef.current.requestId) {
             break;
-          case 'officePreviewReady':
+          }
+          pageImageExportRef.current.requestId = null;
+          setExportPageImageBusy(false);
+          Alert.alert(
+            'Export failed',
+            data.message || 'Could not export this page as an image.'
+          );
+          break;
+        case 'officePreviewReady':
+          if (isPrimary) {
             setOfficePreviewMeta({
               previewKind: data.previewKind || '',
               canConvertToPdf: !!data.canConvertToPdf,
               isEditable: !!data.isEditable,
             });
-            setOfficePdfBusy(false);
-            break;
-          case 'officePreviewExportMeta':
-            if (data.requestId === officePreviewExportRef.current.requestId) {
-              officePreviewExportRef.current = {
-                requestId: data.requestId,
-                chunks: new Array(Math.max(Number(data.totalChunks) || 0, 0)).fill(''),
-              };
-            }
-            break;
-          case 'officePreviewExportChunk':
-            if (
-              data.requestId === officePreviewExportRef.current.requestId &&
-              Number.isInteger(data.index) &&
-              officePreviewExportRef.current.chunks[data.index] !== undefined
-            ) {
-              officePreviewExportRef.current.chunks[data.index] = data.chunk || '';
-            }
-            break;
-          case 'officePreviewExportComplete':
-            if (data.requestId === officePreviewExportRef.current.requestId) {
-              const html = officePreviewExportRef.current.chunks.join('');
-              officePreviewExportRef.current = {
-                requestId: null,
-                chunks: [],
-              };
+          } else {
+            setSecondaryOfficeMeta({
+              previewKind: data.previewKind || '',
+              canConvertToPdf: !!data.canConvertToPdf,
+              isEditable: !!data.isEditable,
+            });
+          }
+          setOfficePdfBusy(false);
+          break;
+        case 'officePreviewExportMeta':
+          if (data.requestId === officePreviewExportRef.current.requestId) {
+            officePreviewExportRef.current = {
+              requestId: data.requestId,
+              chunks: new Array(Math.max(Number(data.totalChunks) || 0, 0)).fill(''),
+            };
+          }
+          break;
+        case 'officePreviewExportChunk':
+          if (
+            data.requestId === officePreviewExportRef.current.requestId &&
+            Number.isInteger(data.index) &&
+            officePreviewExportRef.current.chunks[data.index] !== undefined
+          ) {
+            officePreviewExportRef.current.chunks[data.index] = data.chunk || '';
+          }
+          break;
+        case 'officePreviewExportComplete':
+          if (data.requestId === officePreviewExportRef.current.requestId) {
+            const html = officePreviewExportRef.current.chunks.join('');
+            officePreviewExportRef.current = {
+              requestId: null,
+              chunks: [],
+            };
 
-              if (!html) {
-                setOfficePdfBusy(false);
-                Alert.alert('PDF Conversion Failed', 'Office preview export was empty.');
-                break;
-              }
-
-              finalizeOfficePreviewPdfExport(html, officeSaveModeRef.current)
-                .catch((error) => {
-                  Alert.alert('PDF Conversion Failed', error.message);
-                })
-                .finally(() => {
-                  officeSaveModeRef.current = 'copy';
-                  setOfficePdfBusy(false);
-                });
-            }
-            break;
-          case 'officePreviewExportError':
-            if (data.requestId === officePreviewExportRef.current.requestId) {
-              officePreviewExportRef.current = {
-                requestId: null,
-                chunks: [],
-              };
+            if (!html) {
               setOfficePdfBusy(false);
-              Alert.alert(
-                'PDF Conversion Failed',
-                data.message || 'This document preview could not be exported.'
-              );
+              Alert.alert('PDF Conversion Failed', 'Office preview export was empty.');
+              break;
             }
-            break;
-          case 'officePreviewCommandError':
+
+            finalizeOfficePreviewPdfExport(html, officeSaveModeRef.current)
+              .catch((error) => {
+                Alert.alert('PDF Conversion Failed', error.message);
+              })
+              .finally(() => {
+                officeSaveModeRef.current = 'copy';
+                setOfficePdfBusy(false);
+              });
+          }
+          break;
+        case 'officePreviewExportError':
+          if (data.requestId === officePreviewExportRef.current.requestId) {
+            officePreviewExportRef.current = {
+              requestId: null,
+              chunks: [],
+            };
+            setOfficePdfBusy(false);
             Alert.alert(
-              'Office Edit',
-              data.message || 'Select an editable area in the document first.'
+              'PDF Conversion Failed',
+              data.message || 'This document preview could not be exported.'
             );
-            break;
-          case 'annotationsChanged': {
-            const nextAnnotations = normalizeAnnotationState(data.annotations);
+          }
+          break;
+        case 'officePreviewCommandError':
+          Alert.alert(
+            'Office Edit',
+            data.message || 'Select an editable area in the document first.'
+          );
+          break;
+        case 'annotationsChanged': {
+          const nextAnnotations = normalizeAnnotationState(data.annotations);
+          if (isPrimary) {
             setAnnotationState(nextAnnotations);
             persistAnnotationState(documentKey, nextAnnotations);
-            setSelectedAnnotation((currentSelection) => {
-              if (!currentSelection) {
-                return currentSelection;
-              }
-
-              const pageAnnotations = nextAnnotations[currentSelection.page];
-              if (!pageAnnotations) {
-                return null;
-              }
-
-              const bucket =
-                currentSelection.type === 'highlight'
-                  ? pageAnnotations.highlights
-                  : currentSelection.type === 'drawing'
-                    ? pageAnnotations.drawings
-                    : pageAnnotations.notes;
-
-              return bucket.some(
-                (annotation) => annotation.id === currentSelection.id
-              )
-                ? currentSelection
-                : null;
-            });
-            break;
+          } else {
+            setSecondaryAnnotationState(nextAnnotations);
+            persistAnnotationState(secondaryKey, nextAnnotations);
           }
-          case 'modeChanged':
-            if (data.mode !== 'view') {
-              setSelectedAnnotation(null);
+          setSelectedAnnotation((currentSelection) => {
+            if (!currentSelection) {
+              return currentSelection;
             }
-            break;
-          case 'error':
-            Alert.alert('PDF Error', data.message);
-            break;
+
+            const pageAnnotations = nextAnnotations[currentSelection.page];
+            if (!pageAnnotations) {
+              return null;
+            }
+
+            const bucket =
+              currentSelection.type === 'highlight'
+                ? pageAnnotations.highlights
+                : currentSelection.type === 'drawing'
+                  ? pageAnnotations.drawings
+                  : pageAnnotations.notes;
+
+            return bucket.some((annotation) => annotation.id === currentSelection.id)
+              ? currentSelection
+              : null;
+          });
+          break;
         }
-      } catch {}
+        case 'modeChanged':
+          if (data.mode !== 'view') {
+            setSelectedAnnotation(null);
+          }
+          break;
+        case 'error':
+          Alert.alert('PDF Error', data.message);
+          break;
+        default:
+          break;
+      }
     },
     [
       activeColor,
       activeTool,
+      crossPdfDropMode,
       documentKey,
       documentName,
+      documentType,
       drawBrushPx,
-      markerBrushPx,
       finalizeOfficePreviewPdfExport,
+      injectCommandToSlot,
+      markerBrushPx,
+      performPdfPageTransfer,
       persistAnnotationState,
-      sendCommand,
+      removePdfPageAt,
+      reorderPdfPageInPane,
+      secondaryKey,
+      secondaryName,
+      secondaryType,
+      secondaryUri,
     ]
   );
 
+  const handleWebViewMessagePrimary = useCallback(
+    (event) => {
+      try {
+        const data = JSON.parse(event.nativeEvent.data);
+        processViewerMessage(data, 1);
+      } catch {}
+    },
+    [processViewerMessage]
+  );
+
+  const handleWebViewMessageSecondary = useCallback(
+    (event) => {
+      try {
+        const data = JSON.parse(event.nativeEvent.data);
+        processViewerMessage(data, 2);
+      } catch {}
+    },
+    [processViewerMessage]
+  );
+
+  const dualLayoutHtmlSyncRef = useRef(true);
   useEffect(() => {
-    if (documentType !== 'pdf') {
+    if (dualLayoutHtmlSyncRef.current) {
+      dualLayoutHtmlSyncRef.current = false;
+      return;
+    }
+    if (documentType !== 'pdf' || !base64Data) {
+      return;
+    }
+    const dualPdf = !!secondaryUri && secondaryType === 'pdf';
+    const cur = Math.max(1, Number.parseInt(pageNumberInput, 10) || 1);
+    setViewerHtml(
+      buildViewerHtml(base64Data, annotationState, activeTool, cur, {
+        viewerSlot: 1,
+        crossPaneDragEnabled: dualPdf,
+        dualLayout,
+      })
+    );
+    setViewerInstanceId((v) => v + 1);
+    if (secondaryUri && secondaryBase64 && secondaryType === 'pdf') {
+      const cur2 = Math.max(
+        1,
+        Math.min(Math.max(secondaryTotalPages, 1), Number.parseInt(pageNumberInput, 10) || 1)
+      );
+      setSecondaryViewerHtml(
+        buildViewerHtml(secondaryBase64, secondaryAnnotationState, activeTool, cur2, {
+          viewerSlot: 2,
+          crossPaneDragEnabled: dualPdf,
+          dualLayout,
+        })
+      );
+      setSecondaryViewerInstanceId((v) => v + 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only refresh viewer HTML when split layout toggles
+  }, [dualLayout]);
+
+  const activeDocumentType = activePane === 1 ? documentType : secondaryType;
+  const activeOfficeMeta =
+    activePane === 1 ? officePreviewMeta : secondaryOfficeMeta;
+  const activeTotalPages = activePane === 1 ? totalPages : secondaryTotalPages;
+
+  useEffect(() => {
+    if (crossPdfDropPendingRef.current) {
+      crossPdfDropPendingRef.current.mode =
+        crossPdfDropMode === 'move' ? 'move' : 'copy';
+    }
+  }, [crossPdfDropMode]);
+
+  useEffect(() => {
+    if (activeDocumentType !== 'pdf') {
       return;
     }
     sendCommand({ command: 'setDrawBrushWidth', px: drawBrushPx });
-  }, [documentType, drawBrushPx, sendCommand]);
+  }, [activeDocumentType, drawBrushPx, sendCommand]);
 
   useEffect(() => {
-    if (documentType !== 'pdf') {
+    if (activeDocumentType !== 'pdf') {
       return;
     }
     sendCommand({ command: 'setMarkerBrushWidth', px: markerBrushPx });
-  }, [documentType, markerBrushPx, sendCommand]);
+  }, [activeDocumentType, markerBrushPx, sendCommand]);
 
   const submitTextNote = useCallback(() => {
     if (textNoteModal && noteText.trim()) {
@@ -2961,7 +3848,7 @@ export default function EditPdfPage() {
             name={documentName}
             extension={documentType}
             base64Data={base64Data}
-            onMessage={handleWebViewMessage}
+            onMessage={handleWebViewMessagePrimary}
             webViewRef={webViewRef}
           />
         </View>
@@ -2976,6 +3863,81 @@ export default function EditPdfPage() {
         <Text style={styles.unsupportedHint}>
           You can still copy or share this document using the buttons above.
         </Text>
+      </View>
+    );
+  };
+
+  const renderDocumentPane = (pane) => {
+    const isPrimary = pane === 1;
+    const pdfHtml = isPrimary ? viewerHtml : secondaryViewerHtml;
+    const pdfKey = isPrimary ? documentKey : secondaryKey;
+    const pdfUri = isPrimary ? documentUri : secondaryUri;
+    const pdfInstanceId = isPrimary ? viewerInstanceId : secondaryViewerInstanceId;
+    const webRef = isPrimary ? webViewRef : webViewRef2;
+    const onMsg = isPrimary ? handleWebViewMessagePrimary : handleWebViewMessageSecondary;
+    const type = isPrimary ? documentType : secondaryType;
+
+    if (isPrimary) {
+      if (type === 'pdf' && pdfHtml) {
+        return (
+          <WebView
+            key={`${pdfKey || pdfUri}-${pdfInstanceId}`}
+            ref={webRef}
+            source={{ html: pdfHtml }}
+            style={styles.webView}
+            originWhitelist={['*']}
+            javaScriptEnabled={true}
+            domStorageEnabled={true}
+            onMessage={onMsg}
+            startInLoadingState={true}
+            renderLoading={() => (
+              <ActivityIndicator
+                style={styles.loadingCenter}
+                size="large"
+                color={colors.primary}
+              />
+            )}
+            scrollEnabled={true}
+            scalesPageToFit={false}
+            allowFileAccess={true}
+            mixedContentMode="always"
+          />
+        );
+      }
+      return renderNonPdfViewer();
+    }
+
+    if (type === 'pdf' && pdfHtml) {
+      return (
+        <WebView
+          key={`${pdfKey || pdfUri}-${pdfInstanceId}`}
+          ref={webRef}
+          source={{ html: pdfHtml }}
+          style={styles.webView}
+          originWhitelist={['*']}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          onMessage={onMsg}
+          startInLoadingState={true}
+          renderLoading={() => (
+            <ActivityIndicator
+              style={styles.loadingCenter}
+              size="large"
+              color={colors.primary}
+            />
+          )}
+          scrollEnabled={true}
+          scalesPageToFit={false}
+          allowFileAccess={true}
+          mixedContentMode="always"
+        />
+      );
+    }
+
+    return (
+      <View style={styles.unsupported}>
+        <Text style={styles.unsupportedText}>Second viewer</Text>
+        <Text style={styles.unsupportedHint}>Loading PDF…</Text>
       </View>
     );
   };
@@ -3013,9 +3975,9 @@ export default function EditPdfPage() {
             />
           ) : null}
         </TouchableOpacity>
-        {totalPages > 0 ? (
+        {activeTotalPages > 0 ? (
           <View style={styles.pageCountPill}>
-            <Text style={styles.pageCountLabel}>{totalPages}</Text>
+            <Text style={styles.pageCountLabel}>{activeTotalPages}</Text>
             <Text style={styles.pageCountSuffix}>pages</Text>
           </View>
         ) : null}
@@ -3068,6 +4030,101 @@ export default function EditPdfPage() {
               >
                 <MaterialIcons name="folder-open" size={22} color={colors.primary} />
               </TouchableOpacity>
+              {secondaryUri ? (
+                isDualPdfMode ? (
+                  <>
+                    <View style={styles.layoutToggleGroup}>
+                      <TouchableOpacity
+                        style={[
+                          styles.layoutToggleBtn,
+                          dualLayout === 'row' && styles.layoutToggleBtnActive,
+                        ]}
+                        onPress={() => setDualLayout('row')}
+                        accessibilityLabel="Split view: PDFs side by side"
+                      >
+                        <MaterialIcons
+                          name="view-column"
+                          size={18}
+                          color={dualLayout === 'row' ? colors.primaryDim : colors.onSurface}
+                        />
+                        <Text
+                          style={[
+                            styles.layoutToggleBtnLabel,
+                            dualLayout === 'row' && styles.layoutToggleBtnLabelActive,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          Split
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.layoutToggleBtn,
+                          dualLayout === 'column' && styles.layoutToggleBtnActive,
+                        ]}
+                        onPress={() => setDualLayout('column')}
+                        accessibilityLabel="Stacked view: PDFs top and bottom"
+                      >
+                        <MaterialIcons
+                          name="view-stream"
+                          size={18}
+                          color={
+                            dualLayout === 'column' ? colors.primaryDim : colors.onSurface
+                          }
+                        />
+                        <Text
+                          style={[
+                            styles.layoutToggleBtnLabel,
+                            dualLayout === 'column' && styles.layoutToggleBtnLabelActive,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          Stack
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.mergePagesBarBtn}
+                      onPress={() => setShowPageTransferModal(true)}
+                      accessibilityLabel="Merge pages between the two PDFs"
+                      accessibilityHint="Opens a form to copy or move a page into the other document"
+                    >
+                      <MaterialIcons name="post-add" size={22} color={colors.primaryDim} />
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <TouchableOpacity
+                      style={[
+                        styles.actionIconBtn,
+                        dualLayout === 'row' && styles.actionIconBtnActivePane,
+                      ]}
+                      onPress={() => setDualLayout('row')}
+                      accessibilityLabel="Side by side layout"
+                    >
+                      <MaterialIcons
+                        name="view-column"
+                        size={22}
+                        color={dualLayout === 'row' ? colors.primary : colors.onSurface}
+                      />
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.actionIconBtn,
+                        dualLayout === 'column' && styles.actionIconBtnActivePane,
+                      ]}
+                      onPress={() => setDualLayout('column')}
+                      accessibilityLabel="Top and bottom layout"
+                    >
+                      <MaterialIcons
+                        name="view-stream"
+                        size={22}
+                        color={dualLayout === 'column' ? colors.primary : colors.onSurface}
+                      />
+                    </TouchableOpacity>
+                  </>
+                )
+              ) : null}
               <TouchableOpacity
                 style={styles.actionIconBtn}
                 onPress={copyDocument}
@@ -3082,7 +4139,7 @@ export default function EditPdfPage() {
               >
                 <MaterialIcons name="share" size={22} color={colors.onSurface} />
               </TouchableOpacity>
-              {documentType === 'pdf' && (
+              {activeDocumentType === 'pdf' && (
                 <>
                   <View style={styles.actionBarDivider} />
                   <TouchableOpacity
@@ -3146,14 +4203,14 @@ export default function EditPdfPage() {
                   </TouchableOpacity>
                 </>
               )}
-              {documentType !== 'pdf' &&
-                (TEXT_FILE_EXTENSIONS.includes(documentType) ||
-                  officePreviewMeta.canConvertToPdf ||
-                  (officePreviewMeta.isEditable &&
-                    officePreviewMeta.previewKind === 'text')) && (
+              {activeDocumentType !== 'pdf' &&
+                (TEXT_FILE_EXTENSIONS.includes(activeDocumentType) ||
+                  activeOfficeMeta.canConvertToPdf ||
+                  (activeOfficeMeta.isEditable &&
+                    activeOfficeMeta.previewKind === 'text')) && (
                   <>
                     <View style={styles.actionBarDivider} />
-                    {TEXT_FILE_EXTENSIONS.includes(documentType) && (
+                    {TEXT_FILE_EXTENSIONS.includes(activeDocumentType) && (
                       <TouchableOpacity
                         style={[
                           styles.actionIconBtnPrimary,
@@ -3170,7 +4227,7 @@ export default function EditPdfPage() {
                         />
                       </TouchableOpacity>
                     )}
-                    {officePreviewMeta.canConvertToPdf && (
+                    {activeOfficeMeta.canConvertToPdf && (
                       <TouchableOpacity
                         style={[
                           styles.actionIconBtnPrimary,
@@ -3187,7 +4244,7 @@ export default function EditPdfPage() {
                         />
                       </TouchableOpacity>
                     )}
-                    {officePreviewMeta.isEditable && (
+                    {activeOfficeMeta.isEditable && (
                       <TouchableOpacity
                         style={styles.actionIconBtn}
                         onPress={() => setShowToolbar((currentValue) => !currentValue)}
@@ -3207,7 +4264,119 @@ export default function EditPdfPage() {
             </ScrollView>
           </View>
 
-          {documentType === 'pdf' && (
+          {isDualPdfMode && showDualPdfGuide && !crossPdfDropBanner ? (
+            <View style={styles.dualPdfGuideCard}>
+              <View style={styles.dualPdfGuideHeader}>
+                <MaterialIcons name="menu-book" size={22} color={colors.primaryDim} />
+                <Text style={styles.dualPdfGuideTitle}>Two PDFs — quick tips</Text>
+                <TouchableOpacity
+                  onPress={() => setShowDualPdfGuide(false)}
+                  hitSlop={12}
+                  accessibilityLabel="Dismiss tips"
+                >
+                  <MaterialIcons name="close" size={20} color={colors.onSurface} />
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.dualPdfGuideLine}>
+                <Text style={styles.dualPdfGuideBold}>Reorder: </Text>
+                double-tap a page, then drag onto another page in the same PDF.
+              </Text>
+              <Text style={styles.dualPdfGuideLine}>
+                <Text style={styles.dualPdfGuideBold}>Add to the other PDF: </Text>
+                drag toward the outer screen edge, or tap ⇄ then tap where it should go.
+              </Text>
+              <Text style={styles.dualPdfGuideLine}>
+                <Text style={styles.dualPdfGuideBold}>Page menu ⋮: </Text>
+                change page order or remove a page — or use Merge pages in the bar above.
+              </Text>
+            </View>
+          ) : null}
+
+          {crossPdfDropBanner && secondaryUri ? (
+            <View style={styles.crossPdfBannerCard}>
+              <View style={styles.crossPdfBannerTopRow}>
+                <View style={styles.crossPdfBannerIconWrap}>
+                  <MaterialIcons name="swap-horiz" size={22} color={colors.primaryDim} />
+                </View>
+                <View style={styles.crossPdfBannerTextBlock}>
+                  <Text style={styles.crossPdfBannerKicker}>Cross-document</Text>
+                  <Text style={styles.crossPdfBannerTitle}>Send this page to the other PDF</Text>
+                  <Text style={styles.crossPdfBannerSub}>
+                    Same PDF: drop on another page to reorder. Other PDF: drag to the far edge or
+                    finish here. Tap ⇄ on a page for a quick target. Use ⋮ for page list or remove.
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.crossPdfBannerStepLabel}>How to insert</Text>
+              <View style={styles.crossPdfBannerModes}>
+                <TouchableOpacity
+                  style={[
+                    styles.crossPdfModeChip,
+                    crossPdfDropMode === 'copy' && styles.crossPdfModeChipOn,
+                  ]}
+                  onPress={() => setCrossPdfDropMode('copy')}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: crossPdfDropMode === 'copy' }}
+                >
+                  <MaterialIcons
+                    name="content-copy"
+                    size={16}
+                    color={
+                      crossPdfDropMode === 'copy' ? colors.primaryDim : colors.onSurface
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.crossPdfModeChipText,
+                      crossPdfDropMode === 'copy' && styles.crossPdfModeChipTextOn,
+                    ]}
+                  >
+                    Copy
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.crossPdfModeChip,
+                    crossPdfDropMode === 'move' && styles.crossPdfModeChipOn,
+                  ]}
+                  onPress={() => setCrossPdfDropMode('move')}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: crossPdfDropMode === 'move' }}
+                >
+                  <MaterialIcons
+                    name="drive-file-move"
+                    size={16}
+                    color={
+                      crossPdfDropMode === 'move' ? colors.primaryDim : colors.onSurface
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.crossPdfModeChipText,
+                      crossPdfDropMode === 'move' && styles.crossPdfModeChipTextOn,
+                    ]}
+                  >
+                    Move
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.crossPdfBannerActions}>
+                <TouchableOpacity
+                  style={styles.crossPdfBannerBtnPrimary}
+                  onPress={appendCrossPdfPageToOtherEnd}
+                  disabled={pageTransferBusy}
+                >
+                  <MaterialIcons name="vertical-align-bottom" size={18} color={colors.onPrimary} />
+                  <Text style={styles.crossPdfBannerBtnPrimaryText}>Append at end</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.crossPdfBannerBtnSecondary} onPress={cancelCrossPdfDrop}>
+                  <Text style={styles.crossPdfBannerBtnSecondaryText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : null}
+
+          {activeDocumentType === 'pdf' && (
             <View style={styles.selectionBar}>
               <Text style={styles.selectionText}>
                 {activeTool === 'view'
@@ -3217,17 +4386,17 @@ export default function EditPdfPage() {
             </View>
           )}
 
-          {documentType !== 'pdf' && officePreviewMeta.isEditable && (
+          {activeDocumentType !== 'pdf' && activeOfficeMeta.isEditable && (
             <View style={styles.selectionBar}>
               <Text style={styles.selectionText}>
-                {officePreviewMeta.previewKind === 'text'
+                {activeOfficeMeta.previewKind === 'text'
                   ? 'Plain-text editing: tap the save icon to write your changes and optionally save a copy to a folder on your device (Android). Office files use the toolbar below; tap Save to export as PDF (copy or replace with PDF).'
                   : 'Edit with the toolbar: fonts (dropdown), weight, line height, headings, undo, colors, alignment, lists, and more. Tap an image to resize. Tap Save to export your edits as a PDF — choose a new copy or replace the open file with a PDF.'}
               </Text>
             </View>
           )}
 
-          {documentType === 'pdf' && showToolbar && (
+          {activeDocumentType === 'pdf' && showToolbar && (
             <View style={styles.toolbar}>
               <View style={styles.toolRow}>
                 {TOOLS.map((tool) => (
@@ -3463,7 +4632,7 @@ export default function EditPdfPage() {
                 </TouchableOpacity>
               </ScrollView>
 
-              {officePreviewMeta.previewKind === 'presentation' && (
+              {activeOfficeMeta.previewKind === 'presentation' && (
                 <>
                   <Text style={styles.officeSubheadingLabel}>Deck theme</Text>
                   <ScrollView
@@ -3703,7 +4872,65 @@ export default function EditPdfPage() {
             </View>
             )}
 
-          {documentType === 'pdf' && viewerHtml ? (
+          {secondaryUri ? (
+            <View
+              style={[
+                styles.dualViewerOuter,
+                { flexDirection: dualLayout === 'row' ? 'row' : 'column' },
+              ]}
+            >
+              <View
+                style={[
+                  styles.dualPaneShell,
+                  activePane === 1 && styles.dualPaneShellActive,
+                ]}
+              >
+                <TouchableOpacity
+                  style={styles.dualPaneTab}
+                  onPress={() => setActivePane(1)}
+                  activeOpacity={0.85}
+                >
+                  <MaterialIcons
+                    name="description"
+                    size={16}
+                    color={activePane === 1 ? colors.primary : colors.onSurface}
+                  />
+                  <Text
+                    style={styles.dualPaneTabText}
+                    numberOfLines={1}
+                  >
+                    {documentName || 'Document 1'}
+                  </Text>
+                </TouchableOpacity>
+                <View style={styles.dualPaneBody}>{renderDocumentPane(1)}</View>
+              </View>
+              <View
+                style={[
+                  styles.dualPaneShell,
+                  activePane === 2 && styles.dualPaneShellActive,
+                ]}
+              >
+                <TouchableOpacity
+                  style={styles.dualPaneTab}
+                  onPress={() => setActivePane(2)}
+                  activeOpacity={0.85}
+                >
+                  <MaterialIcons
+                    name="description"
+                    size={16}
+                    color={activePane === 2 ? colors.primary : colors.onSurface}
+                  />
+                  <Text
+                    style={styles.dualPaneTabText}
+                    numberOfLines={1}
+                  >
+                    {secondaryName || 'Document 2'}
+                  </Text>
+                </TouchableOpacity>
+                <View style={styles.dualPaneBody}>{renderDocumentPane(2)}</View>
+              </View>
+            </View>
+          ) : documentType === 'pdf' && viewerHtml ? (
             <WebView
               key={`${documentKey || documentUri}-${viewerInstanceId}`}
               ref={webViewRef}
@@ -3712,7 +4939,7 @@ export default function EditPdfPage() {
               originWhitelist={['*']}
               javaScriptEnabled={true}
               domStorageEnabled={true}
-              onMessage={handleWebViewMessage}
+              onMessage={handleWebViewMessagePrimary}
               startInLoadingState={true}
               renderLoading={() => (
                 <ActivityIndicator
@@ -3782,7 +5009,7 @@ export default function EditPdfPage() {
               Word, PowerPoint, and HTML now preserve each PDF page as a full
               page image. Text and Markdown stay text-based for easier editing.
             </Text>
-            {PDF_CONVERSION_FORMATS.map((formatConfig) => (
+            {PdfConversionFormats.PDF_CONVERSION_FORMATS.map((formatConfig) => (
               <TouchableOpacity
                 key={formatConfig.id}
                 style={styles.pageActionBtnPrimary}
@@ -3799,6 +5026,232 @@ export default function EditPdfPage() {
                 onPress={() => setShowConvertModal(false)}
               >
                 <Text style={styles.modalBtnCancelText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={showOpenChoiceModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowOpenChoiceModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Open document</Text>
+            <Text style={styles.pageEditorHint}>
+              Replace what you are viewing with another file, or open a second PDF alongside it.
+              Two PDFs can be shown side by side or stacked; you can copy, move, or reorder pages
+              between them.
+            </Text>
+            <TouchableOpacity
+              style={styles.pageActionBtnPrimary}
+              onPress={() => {
+                setShowOpenChoiceModal(false);
+                pickDocumentIntoSlot(1, { replaceAll: true });
+              }}
+            >
+              <Text style={styles.pageActionBtnPrimaryText}>Replace with new file</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.pageActionBtnPrimary}
+              onPress={() => {
+                setShowOpenChoiceModal(false);
+                pickDocumentIntoSlot(2);
+              }}
+            >
+              <Text style={styles.pageActionBtnPrimaryText}>Add second PDF</Text>
+            </TouchableOpacity>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalBtnCancel}
+                onPress={() => setShowOpenChoiceModal(false)}
+              >
+                <Text style={styles.modalBtnCancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={showPageTransferModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => !pageTransferBusy && setShowPageTransferModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, styles.pageTransferModalCard]}>
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <Text style={styles.modalTitle}>Merge pages</Text>
+              <Text style={styles.pageEditorHint}>
+                Copy or move one page from either PDF into the other. Page content is merged;
+                ink and highlights on the new page start fresh. All other pages stay as they are.
+              </Text>
+
+              <Text style={styles.pageSelectionLabel}>From document</Text>
+              <View style={styles.pageTransferRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pageTransferChip,
+                    pageTransferSourcePane === 1 && styles.pageTransferChipOn,
+                  ]}
+                  onPress={() => setPageTransferSourcePane(1)}
+                >
+                  <Text
+                    style={[
+                      styles.pageTransferChipText,
+                      pageTransferSourcePane === 1 && styles.pageTransferChipTextOn,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    1 — {shortDocLabel(documentName || 'First')}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pageTransferChip,
+                    pageTransferSourcePane === 2 && styles.pageTransferChipOn,
+                  ]}
+                  onPress={() => setPageTransferSourcePane(2)}
+                >
+                  <Text
+                    style={[
+                      styles.pageTransferChipText,
+                      pageTransferSourcePane === 2 && styles.pageTransferChipTextOn,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    2 — {shortDocLabel(secondaryName || 'Second')}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.pageSelectionLabel}>Into document</Text>
+              <View style={styles.pageTransferRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pageTransferChip,
+                    pageTransferTargetPane === 1 && styles.pageTransferChipOn,
+                  ]}
+                  onPress={() => setPageTransferTargetPane(1)}
+                >
+                  <Text
+                    style={[
+                      styles.pageTransferChipText,
+                      pageTransferTargetPane === 1 && styles.pageTransferChipTextOn,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    1 — {shortDocLabel(documentName || 'First')}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pageTransferChip,
+                    pageTransferTargetPane === 2 && styles.pageTransferChipOn,
+                  ]}
+                  onPress={() => setPageTransferTargetPane(2)}
+                >
+                  <Text
+                    style={[
+                      styles.pageTransferChipText,
+                      pageTransferTargetPane === 2 && styles.pageTransferChipTextOn,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    2 — {shortDocLabel(secondaryName || 'Second')}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.pageSelectionLabel}>Source page #</Text>
+              <TextInput
+                style={styles.modalInput}
+                value={pageTransferSourcePage}
+                onChangeText={setPageTransferSourcePage}
+                keyboardType="number-pad"
+                placeholder="1"
+                placeholderTextColor={withAlpha(colors.onSurface, 0.45)}
+              />
+
+              <Text style={styles.pageSelectionLabel}>
+                Insert before page # (in target document)
+              </Text>
+              <Text style={styles.pageEditorHint}>
+                Use 1 to insert at the beginning. Use one more than the last page number to append
+                at the end.
+              </Text>
+              <TextInput
+                style={styles.modalInput}
+                value={pageTransferInsertBefore}
+                onChangeText={setPageTransferInsertBefore}
+                keyboardType="number-pad"
+                placeholder="1"
+                placeholderTextColor={withAlpha(colors.onSurface, 0.45)}
+              />
+
+              <Text style={styles.pageSelectionLabel}>Mode</Text>
+              <View style={styles.pageTransferRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pageTransferChip,
+                    pageTransferMode === 'copy' && styles.pageTransferChipOn,
+                  ]}
+                  onPress={() => setPageTransferMode('copy')}
+                >
+                  <Text
+                    style={[
+                      styles.pageTransferChipText,
+                      pageTransferMode === 'copy' && styles.pageTransferChipTextOn,
+                    ]}
+                  >
+                    Copy
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pageTransferChip,
+                    pageTransferMode === 'move' && styles.pageTransferChipOn,
+                  ]}
+                  onPress={() => setPageTransferMode('move')}
+                >
+                  <Text
+                    style={[
+                      styles.pageTransferChipText,
+                      pageTransferMode === 'move' && styles.pageTransferChipTextOn,
+                    ]}
+                  >
+                    Move (remove from source)
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalBtnCancel}
+                disabled={pageTransferBusy}
+                onPress={() => setShowPageTransferModal(false)}
+              >
+                <Text style={styles.modalBtnCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.modalBtnSubmit,
+                  pageTransferBusy && styles.actionBtnDisabled,
+                ]}
+                disabled={pageTransferBusy}
+                onPress={executePdfPageTransfer}
+              >
+                <Text style={styles.modalBtnSubmitText}>
+                  {pageTransferBusy ? 'Working…' : 'Merge pages'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -3862,7 +5315,7 @@ export default function EditPdfPage() {
                 for that page instantly.
               </Text>
               <Text style={styles.pageEditorMeta}>
-                Current pages: {totalPages}
+                Current pages: {activeTotalPages}
               </Text>
               <View style={styles.pageSelectionCard}>
                 <Text style={styles.pageSelectionLabel}>Selected page</Text>
@@ -3958,6 +5411,20 @@ export default function EditPdfPage() {
           />
           <View style={styles.overflowMenuCard}>
             <Text style={styles.overflowMenuTitle}>More options</Text>
+            {secondaryUri && documentType === 'pdf' && secondaryType === 'pdf' ? (
+              <TouchableOpacity
+                style={styles.overflowMenuRow}
+                onPress={() => {
+                  setShowPdfOverflowMenu(false);
+                  setShowPageTransferModal(true);
+                }}
+              >
+                <MaterialIcons name="swap-horiz" size={22} color={colors.onSurface} />
+                <Text style={styles.overflowMenuRowText}>
+                  Move or copy page between PDFs
+                </Text>
+              </TouchableOpacity>
+            ) : null}
             <TouchableOpacity
               style={styles.overflowMenuRow}
               onPress={() => {
@@ -4429,6 +5896,209 @@ const styles = StyleSheet.create({
     backgroundColor: withAlpha(colors.outlineVariant, 0.9),
     marginHorizontal: 4,
   },
+  layoutToggleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginRight: 2,
+  },
+  layoutToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.85),
+    backgroundColor: colors.surfaceContainerLowest,
+    maxWidth: 120,
+  },
+  layoutToggleBtnActive: {
+    borderColor: colors.primaryDim,
+    backgroundColor: withAlpha(colors.primary, 0.12),
+  },
+  layoutToggleBtnLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: withAlpha(colors.onSurface, 0.85),
+  },
+  layoutToggleBtnLabelActive: {
+    color: colors.primaryDim,
+  },
+  mergePagesBarBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: colors.primaryDim,
+    backgroundColor: withAlpha(colors.primary, 0.1),
+  },
+  dualPdfGuideCard: {
+    marginHorizontal: spacing.sm,
+    marginBottom: spacing.sm,
+    padding: spacing.sm,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceContainerLowest,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.65),
+    ...Platform.select({
+      ios: {
+        shadowColor: colors.onSurface,
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.06,
+        shadowRadius: 3,
+      },
+      android: { elevation: 2 },
+    }),
+  },
+  dualPdfGuideHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  dualPdfGuideTitle: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.onSurface,
+  },
+  dualPdfGuideLine: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: withAlpha(colors.onSurface, 0.78),
+    marginBottom: 6,
+  },
+  dualPdfGuideBold: {
+    fontWeight: '700',
+    color: colors.onSurface,
+  },
+  crossPdfBannerCard: {
+    marginHorizontal: spacing.sm,
+    marginBottom: spacing.sm,
+    padding: spacing.sm,
+    borderRadius: radius.md,
+    backgroundColor: withAlpha(colors.primary, 0.07),
+    borderWidth: 1,
+    borderColor: withAlpha(colors.primaryDim, 0.35),
+    ...Platform.select({
+      ios: {
+        shadowColor: colors.onSurface,
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.08,
+        shadowRadius: 4,
+      },
+      android: { elevation: 3 },
+    }),
+  },
+  crossPdfBannerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginBottom: 10,
+  },
+  crossPdfBannerIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: withAlpha(colors.primary, 0.12),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  crossPdfBannerTextBlock: {
+    flex: 1,
+    minWidth: 140,
+  },
+  crossPdfBannerKicker: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    color: colors.primaryDim,
+    marginBottom: 2,
+  },
+  crossPdfBannerTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.onSurface,
+    marginBottom: 4,
+  },
+  crossPdfBannerSub: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: withAlpha(colors.onSurface, 0.72),
+  },
+  crossPdfBannerStepLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: withAlpha(colors.onSurface, 0.88),
+    marginBottom: 6,
+  },
+  crossPdfBannerModes: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 10,
+  },
+  crossPdfModeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.85),
+    backgroundColor: colors.surfaceContainerLowest,
+  },
+  crossPdfModeChipOn: {
+    borderColor: colors.primaryDim,
+    backgroundColor: withAlpha(colors.primary, 0.16),
+  },
+  crossPdfModeChipText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.onSurface,
+  },
+  crossPdfModeChipTextOn: {
+    color: colors.primaryDim,
+  },
+  crossPdfBannerActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+  },
+  crossPdfBannerBtnPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: radius.sm,
+    backgroundColor: colors.primaryDim,
+  },
+  crossPdfBannerBtnPrimaryText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.onPrimary,
+  },
+  crossPdfBannerBtnSecondary: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: radius.sm,
+    backgroundColor: colors.surfaceContainerLowest,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.75),
+  },
+  crossPdfBannerBtnSecondaryText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.primaryDim,
+  },
   actionBtn: {
     backgroundColor: ui.shellSoft,
     paddingHorizontal: 14,
@@ -4608,6 +6278,44 @@ const styles = StyleSheet.create({
   webView: {
     flex: 1,
     backgroundColor: colors.surfaceContainerLow,
+  },
+  dualViewerOuter: {
+    flex: 1,
+    minHeight: 0,
+  },
+  dualPaneShell: {
+    flex: 1,
+    minHeight: 120,
+    minWidth: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: withAlpha(colors.outlineVariant, 0.65),
+  },
+  dualPaneShellActive: {
+    borderColor: colors.primaryDim,
+    borderWidth: 2,
+  },
+  dualPaneTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: ui.shellElevated,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.outlineVariant,
+  },
+  dualPaneTabText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.onSurface,
+  },
+  dualPaneBody: {
+    flex: 1,
+    minHeight: 0,
+  },
+  actionIconBtnActivePane: {
+    borderColor: colors.primaryDim,
   },
   loadingCenter: {
     position: 'absolute',
@@ -5078,6 +6786,40 @@ const styles = StyleSheet.create({
   },
   pageEditorModalCard: {
     maxHeight: '88%',
+  },
+  pageTransferModalCard: {
+    maxHeight: '88%',
+    width: '92%',
+    maxWidth: 420,
+  },
+  pageTransferRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+  },
+  pageTransferChip: {
+    flex: 1,
+    minWidth: 120,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: withAlpha(colors.outlineVariant, 0.85),
+    backgroundColor: colors.surfaceContainerLowest,
+  },
+  pageTransferChipOn: {
+    borderColor: colors.primaryDim,
+    backgroundColor: withAlpha(colors.primary, 0.12),
+  },
+  pageTransferChipText: {
+    fontSize: 12,
+    color: colors.onSurface,
+    textAlign: 'center',
+  },
+  pageTransferChipTextOn: {
+    fontWeight: '600',
+    color: colors.primaryDim,
   },
   pageEditorModalScroll: {
     flexGrow: 0,

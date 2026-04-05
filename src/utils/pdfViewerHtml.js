@@ -10,6 +10,10 @@ export function getPdfViewerHtml(base64Data, options = {}) {
   const initialHighlightColor = JSON.stringify(
     options.initialHighlightColor || '#FF000066'
   );
+  const viewerSlot = Math.max(1, Math.min(2, Number(options.viewerSlot) || 1));
+  const crossPaneDragEnabled = !!options.crossPaneDragEnabled;
+  const dualLayout =
+    options.dualLayout === 'column' ? 'column' : 'row';
   const initialSelectedPage = Math.max(1, Number(options.initialSelectedPage) || 1);
   const initialDrawBrushPx = Math.max(
     1.5,
@@ -60,6 +64,14 @@ export function getPdfViewerHtml(base64Data, options = {}) {
         0 0 0 6px rgba(25, 118, 210, 0.88),
         0 14px 30px rgba(0, 0, 0, 0.35);
       transform: translateY(-1px);
+    }
+    .page-wrapper.page-wrapper-lift {
+      z-index: 3;
+      transform: translateY(-8px) scale(1.02);
+      box-shadow:
+        0 0 0 3px rgba(100, 181, 246, 0.95),
+        0 18px 36px rgba(0, 0, 0, 0.45);
+      transition: transform 160ms ease, box-shadow 160ms ease;
     }
     .page-wrapper canvas {
       display: block;
@@ -130,6 +142,96 @@ export function getPdfViewerHtml(base64Data, options = {}) {
       padding: 2px 0 6px;
       transition: color 140ms ease;
     }
+    .page-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 2px 8px 8px;
+      width: 100%;
+      max-width: 100%;
+    }
+    .page-label-text {
+      color: #aaa;
+      font-size: 11px;
+      transition: color 140ms ease;
+    }
+    .page-label-row.selected .page-label-text {
+      color: #f3f7ff;
+    }
+    .page-drag-handle {
+      flex-shrink: 0;
+      touch-action: none;
+      padding: 6px 10px;
+      min-width: 40px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #c5cae9;
+      font-size: 16px;
+      line-height: 1;
+      cursor: grab;
+    }
+    .page-drag-handle:active {
+      background: rgba(25, 118, 210, 0.45);
+      border-color: rgba(100, 181, 246, 0.9);
+    }
+    .page-menu-btn {
+      flex-shrink: 0;
+      touch-action: manipulation;
+      padding: 6px 10px;
+      min-width: 36px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #e0e0e0;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .page-menu-btn:active {
+      background: rgba(25, 118, 210, 0.4);
+    }
+    .page-menu-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 99998;
+      background: transparent;
+    }
+    .page-menu-dropdown {
+      position: fixed;
+      z-index: 99999;
+      min-width: 200px;
+      background: #fafafa;
+      border-radius: 10px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+      overflow: hidden;
+      border: 1px solid rgba(0, 0, 0, 0.12);
+    }
+    .page-menu-item {
+      padding: 14px 16px;
+      font-size: 14px;
+      color: #222;
+      border: none;
+      width: 100%;
+      text-align: left;
+      background: #fff;
+      cursor: pointer;
+    }
+    .page-menu-item:active {
+      background: #e3f2fd;
+    }
+    .page-menu-item.danger {
+      color: #b71c1c;
+    }
+    .page-wrapper.page-wrapper-dimmed {
+      opacity: 0.38;
+      transition: opacity 140ms ease;
+    }
+    .page-drag-ghost {
+      pointer-events: none;
+    }
     .page-label.selected {
       color: #f3f7ff;
     }
@@ -174,6 +276,12 @@ export function getPdfViewerHtml(base64Data, options = {}) {
     let activeDrag = null;
     let suppressNextClick = false;
     const pageMetrics = {};
+    const VIEWER_SLOT = ${viewerSlot};
+    const CROSS_PANE_DRAG = ${crossPaneDragEnabled ? 'true' : 'false'};
+    const DUAL_LAYOUT = '${dualLayout}';
+    let crossPdfLastTap = { time: 0, page: 0 };
+    let pageGhostDrag = null;
+    let pageMenuOpenFor = 0;
 
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -909,63 +1017,6 @@ export function getPdfViewerHtml(base64Data, options = {}) {
     function setupAnnotationLayer(overlay, pageNum) {
       let draftRect = null;
       let startPoint = null;
-      let pagePressTimer = null;
-      let pagePressStartCoords = null;
-      let pagePressTriggered = false;
-
-      function clearPagePress() {
-        if (pagePressTimer) {
-          clearTimeout(pagePressTimer);
-          pagePressTimer = null;
-        }
-        pagePressStartCoords = null;
-        pagePressTriggered = false;
-      }
-
-      function startPagePress(event) {
-        if (event.target !== overlay) {
-          return;
-        }
-
-        pagePressStartCoords = getEventCoords(event);
-        pagePressTriggered = false;
-        pagePressTimer = setTimeout(() => {
-          pagePressTimer = null;
-          pagePressTriggered = true;
-          setSelectedPage(pageNum);
-          selectAnnotation(null);
-          suppressNextClick = true;
-          sendMessage({
-            type: 'pageLongPressed',
-            page: pageNum,
-          });
-        }, 420);
-      }
-
-      function movePagePress(event) {
-        if (!pagePressTimer || !pagePressStartCoords) {
-          return;
-        }
-
-        const coords = getEventCoords(event);
-        const deltaX = coords.clientX - pagePressStartCoords.clientX;
-        const deltaY = coords.clientY - pagePressStartCoords.clientY;
-
-        if (Math.sqrt(deltaX * deltaX + deltaY * deltaY) > 6) {
-          clearPagePress();
-        }
-      }
-
-      function finishPagePress() {
-        const didLongPress = pagePressTriggered;
-        if (pagePressTimer) {
-          clearTimeout(pagePressTimer);
-          pagePressTimer = null;
-        }
-        pagePressStartCoords = null;
-        pagePressTriggered = false;
-        return didLongPress;
-      }
 
       function onDown(event) {
         if (
@@ -997,7 +1048,22 @@ export function getPdfViewerHtml(base64Data, options = {}) {
         }
 
         if (currentMode === 'view') {
-          startPagePress(event);
+          if (event.target === overlay) {
+            const now = Date.now();
+            if (
+              crossPdfLastTap.page === pageNum &&
+              now - crossPdfLastTap.time < 450
+            ) {
+              crossPdfLastTap = { time: 0, page: 0 };
+              event.preventDefault();
+              event.stopPropagation();
+              suppressNextClick = true;
+              const c = getEventCoords(event);
+              beginPageGhostDrag(pageNum, c.clientX, c.clientY);
+              return;
+            }
+            crossPdfLastTap = { time: now, page: pageNum };
+          }
           return;
         }
 
@@ -1028,7 +1094,6 @@ export function getPdfViewerHtml(base64Data, options = {}) {
 
       function onMove(event) {
         if (currentMode === 'view') {
-          movePagePress(event);
           return;
         }
 
@@ -1044,7 +1109,6 @@ export function getPdfViewerHtml(base64Data, options = {}) {
 
       function onUp(event) {
         if (currentMode === 'view') {
-          finishPagePress();
           return;
         }
 
@@ -1080,11 +1144,11 @@ export function getPdfViewerHtml(base64Data, options = {}) {
       overlay.addEventListener('touchstart', onDown, { passive: false });
       overlay.addEventListener('touchmove', onMove, { passive: false });
       overlay.addEventListener('touchend', onUp, { passive: false });
-      overlay.addEventListener('touchcancel', clearPagePress);
+      overlay.addEventListener('touchcancel', function () {});
       overlay.addEventListener('mousedown', onDown);
       overlay.addEventListener('mousemove', onMove);
       overlay.addEventListener('mouseup', onUp);
-      overlay.addEventListener('mouseleave', clearPagePress);
+      overlay.addEventListener('mouseleave', function () {});
 
       overlay.addEventListener('click', (event) => {
         if (currentMode !== 'view' || event.target !== overlay) {
@@ -1267,6 +1331,212 @@ export function getPdfViewerHtml(base64Data, options = {}) {
       };
     }
 
+    function setupCrossPaneDragHandle(handle, pageNum) {
+      function onTap(event) {
+        if (!CROSS_PANE_DRAG) {
+          return;
+        }
+        event.stopPropagation();
+        event.preventDefault();
+        sendMessage({
+          type: 'crossPdfPickSource',
+          slot: VIEWER_SLOT,
+          page: pageNum,
+        });
+      }
+      handle.addEventListener('click', onTap);
+    }
+
+    function isNearCrossPaneEdge(clientX, clientY, vw, vh) {
+      const margin = Math.min(vw, vh) * 0.17;
+      if (DUAL_LAYOUT === 'column') {
+        if (VIEWER_SLOT === 1) {
+          return clientY > vh - margin;
+        }
+        return clientY < margin;
+      }
+      if (VIEWER_SLOT === 1) {
+        return clientX > vw - margin;
+      }
+      return clientX < margin;
+    }
+
+    function closePageMenu() {
+      const back = document.getElementById('page-menu-backdrop');
+      const drop = document.getElementById('page-menu-dropdown');
+      if (back) {
+        back.remove();
+      }
+      if (drop) {
+        drop.remove();
+      }
+      pageMenuOpenFor = 0;
+    }
+
+    function openPageMenu(pageNum, anchorEl) {
+      closePageMenu();
+      pageMenuOpenFor = pageNum;
+      const rect = anchorEl.getBoundingClientRect();
+      const backdrop = document.createElement('div');
+      backdrop.id = 'page-menu-backdrop';
+      backdrop.className = 'page-menu-backdrop';
+      backdrop.addEventListener('click', closePageMenu);
+      const menu = document.createElement('div');
+      menu.id = 'page-menu-dropdown';
+      menu.className = 'page-menu-dropdown';
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'page-menu-item';
+      editBtn.textContent = 'Edit pages (order, remove…)';
+      editBtn.addEventListener('click', function () {
+        closePageMenu();
+        sendMessage({
+          type: 'pageMenuAction',
+          action: 'editPages',
+          slot: VIEWER_SLOT,
+          page: pageNum,
+        });
+      });
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'page-menu-item danger';
+      removeBtn.textContent = 'Remove this page…';
+      removeBtn.addEventListener('click', function () {
+        closePageMenu();
+        sendMessage({
+          type: 'pageMenuAction',
+          action: 'removePage',
+          slot: VIEWER_SLOT,
+          page: pageNum,
+        });
+      });
+      menu.appendChild(editBtn);
+      menu.appendChild(removeBtn);
+      document.body.appendChild(backdrop);
+      document.body.appendChild(menu);
+      const mw = menu.offsetWidth || 200;
+      const mh = menu.offsetHeight || 120;
+      let left = rect.left + rect.width / 2 - mw / 2;
+      let top = rect.bottom + 6;
+      if (left < 8) {
+        left = 8;
+      }
+      if (left + mw > window.innerWidth - 8) {
+        left = window.innerWidth - mw - 8;
+      }
+      if (top + mh > window.innerHeight - 8) {
+        top = rect.top - mh - 6;
+      }
+      menu.style.left = left + 'px';
+      menu.style.top = top + 'px';
+    }
+
+    function setupPageMenuButton(btn, pageNum) {
+      btn.addEventListener('click', function (event) {
+        event.stopPropagation();
+        event.preventDefault();
+        if (pageMenuOpenFor === pageNum) {
+          closePageMenu();
+        } else {
+          openPageMenu(pageNum, btn);
+        }
+      });
+    }
+
+    function finishPageGhostDrag(fromPage, clientX, clientY) {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      if (CROSS_PANE_DRAG && isNearCrossPaneEdge(clientX, clientY, vw, vh)) {
+        sendMessage({
+          type: 'crossPdfPickSource',
+          slot: VIEWER_SLOT,
+          page: fromPage,
+        });
+        return;
+      }
+      let el = document.elementFromPoint(clientX, clientY);
+      let targetPage = null;
+      let depth = 0;
+      while (el && depth < 22) {
+        if (el.classList && el.classList.contains('page-wrapper')) {
+          targetPage = Number(el.dataset.page);
+          break;
+        }
+        el = el.parentElement;
+        depth += 1;
+      }
+      if (
+        targetPage &&
+        targetPage !== fromPage &&
+        totalPages > 1
+      ) {
+        sendMessage({
+          type: 'pageReorderDrag',
+          slot: VIEWER_SLOT,
+          fromPage: fromPage,
+          toAfterPage: targetPage,
+        });
+      }
+    }
+
+    function beginPageGhostDrag(pageNum, clientX, clientY) {
+      const wrap = document.querySelector('.page-wrapper[data-page="' + pageNum + '"]');
+      if (!wrap) {
+        return;
+      }
+      const rect = wrap.getBoundingClientRect();
+      const ghost = wrap.cloneNode(true);
+      ghost.classList.add('page-drag-ghost');
+      ghost.style.position = 'fixed';
+      ghost.style.zIndex = '100000';
+      ghost.style.pointerEvents = 'none';
+      ghost.style.left = clientX - rect.width / 2 + 'px';
+      ghost.style.top = clientY - rect.height / 2 + 'px';
+      ghost.style.width = rect.width + 'px';
+      ghost.style.height = rect.height + 'px';
+      ghost.style.transform = 'scale(1.06)';
+      ghost.style.boxShadow = '0 22px 48px rgba(0, 0, 0, 0.48)';
+      document.body.appendChild(ghost);
+      wrap.classList.add('page-wrapper-dimmed');
+      const gw = rect.width;
+      const gh = rect.height;
+      pageGhostDrag = { pageNum: pageNum, ghost: ghost, wrap: wrap, gw: gw, gh: gh };
+
+      function move(ev) {
+        if (!pageGhostDrag) {
+          return;
+        }
+        ev.preventDefault();
+        const c = getEventCoords(ev);
+        pageGhostDrag.ghost.style.left = c.clientX - pageGhostDrag.gw / 2 + 'px';
+        pageGhostDrag.ghost.style.top = c.clientY - pageGhostDrag.gh / 2 + 'px';
+      }
+
+      function end(ev) {
+        document.removeEventListener('touchmove', move);
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('touchend', end);
+        document.removeEventListener('mouseup', end);
+        const c = getEventCoords(ev);
+        const px = c.clientX;
+        const py = c.clientY;
+        if (pageGhostDrag && pageGhostDrag.ghost) {
+          pageGhostDrag.ghost.remove();
+        }
+        if (pageGhostDrag && pageGhostDrag.wrap) {
+          pageGhostDrag.wrap.classList.remove('page-wrapper-dimmed');
+        }
+        const fromP = pageGhostDrag ? pageGhostDrag.pageNum : pageNum;
+        pageGhostDrag = null;
+        finishPageGhostDrag(fromP, px, py);
+      }
+
+      document.addEventListener('touchmove', move, { passive: false });
+      document.addEventListener('mousemove', move);
+      document.addEventListener('touchend', end);
+      document.addEventListener('mouseup', end);
+    }
+
     document.addEventListener('touchmove', updateActiveDrag, { passive: false });
     document.addEventListener('touchend', endActiveDrag, { passive: false });
     document.addEventListener('touchcancel', endActiveDrag, { passive: false });
@@ -1438,9 +1708,31 @@ export function getPdfViewerHtml(base64Data, options = {}) {
       wrapper.appendChild(overlay);
 
       const label = document.createElement('div');
-      label.className = 'page-label';
       label.dataset.page = pageNum;
-      label.textContent = 'Page ' + pageNum + ' of ' + totalPages;
+      label.className = 'page-label page-label-row';
+      const text = document.createElement('span');
+      text.className = 'page-label-text';
+      text.textContent = 'Page ' + pageNum + ' of ' + totalPages;
+      label.appendChild(text);
+      if (CROSS_PANE_DRAG) {
+        const dragHandle = document.createElement('button');
+        dragHandle.type = 'button';
+        dragHandle.className = 'page-drag-handle';
+        dragHandle.setAttribute(
+          'aria-label',
+          'Tap to copy or move this page into the other PDF'
+        );
+        dragHandle.textContent = '⇄';
+        setupCrossPaneDragHandle(dragHandle, pageNum);
+        label.appendChild(dragHandle);
+      }
+      const menuBtn = document.createElement('button');
+      menuBtn.type = 'button';
+      menuBtn.className = 'page-menu-btn';
+      menuBtn.setAttribute('aria-label', 'Page options');
+      menuBtn.textContent = '⋮';
+      setupPageMenuButton(menuBtn, pageNum);
+      label.appendChild(menuBtn);
 
       const container = document.getElementById('pdf-container');
       container.appendChild(wrapper);

@@ -39,9 +39,9 @@ const actions: HomeAction[] = [
   },
   {
     title: "PDF Converter",
-    description: "Convert PDFs to other formats",
+    description: "Convert documents — PDF, Office, and more",
     icon: "doc.text.fill",
-    href: "/edit-pdf",
+    href: "/convert-pdf",
     tone: "lilac",
   },
 ];
