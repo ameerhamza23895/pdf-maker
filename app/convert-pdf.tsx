@@ -23,6 +23,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CONVERSION_READ_MORE_SECTIONS } from '@/src/constants/conversionReadMore';
 import { DOCUMENT_PICKER_TYPES } from '@/src/constants/documentPicker';
 import { PDF_CONVERSION_FORMATS } from '@/src/constants/pdfConversionFormats';
+import { recordSavedFile } from '@/src/db/savedFileHistory';
 import { setPendingEditDocument } from '@/src/navigation/pendingEditDocument';
 import { electricCuratorTheme, withAlpha } from '@/src/theme/electric-curator';
 import { buildConvertedFileName } from '@/src/utils/convertOutputFileName';
@@ -129,6 +130,13 @@ export default function ConvertPdfPage() {
             const outputUri = `${Paths.document.uri}${fileName}`;
             await LegacyFileSystem.writeAsStringAsync(outputUri, convertedBase64, {
               encoding: LegacyFileSystem.EncodingType.Base64,
+            });
+
+            void recordSavedFile({
+              uri: outputUri,
+              fileName,
+              mimeType,
+              source: 'convert_pdf_screen',
             });
 
             const canShare = await Sharing.isAvailableAsync();

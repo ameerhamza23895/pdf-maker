@@ -41,6 +41,7 @@ import {
 } from '@/src/constants/documentPicker';
 import * as PdfConversionFormats from '@/src/constants/pdfConversionFormats';
 import { consumePendingEditDocument } from '@/src/navigation/pendingEditDocument';
+import { recordSavedFile } from '@/src/db/savedFileHistory';
 
 const { colors, spacing, radius } = electricCuratorTheme;
 const ui = {
@@ -787,6 +788,14 @@ async function saveBase64ToAndroidDeviceFolder(base64Contents, fileName, mimeTyp
         encoding: LegacyFileSystem.EncodingType.Base64,
       }
     );
+
+    void recordSavedFile({
+      uri: targetUri,
+      fileName,
+      mimeType,
+      directoryUri: permission.directoryUri,
+      source: 'android_saf',
+    });
 
     return {
       savedToDevice: true,
@@ -2091,6 +2100,13 @@ export default function EditPdfPage() {
         to: nextUri,
       });
 
+      void recordSavedFile({
+        uri: nextUri,
+        fileName: newName,
+        mimeType: documentType ? `${documentType}` : null,
+        source: 'document_copy',
+      });
+
       Alert.alert('Success', 'Document copied as: ' + newName);
     } catch (error) {
       Alert.alert('Error', 'Failed to copy: ' + error.message);
@@ -2369,6 +2385,13 @@ export default function EditPdfPage() {
           encoding: LegacyFileSystem.EncodingType.Base64,
         });
 
+        void recordSavedFile({
+          uri: outputUri,
+          fileName: pdfFileName,
+          mimeType: 'application/pdf',
+          source: 'office_replace_pdf',
+        });
+
         const deviceSaveResult =
           Platform.OS === 'android'
             ? await savePdfToAndroidDeviceFolder(convertedPdfBase64, pdfFileName)
@@ -2410,6 +2433,13 @@ export default function EditPdfPage() {
 
       await LegacyFileSystem.writeAsStringAsync(outputUri, convertedPdfBase64, {
         encoding: LegacyFileSystem.EncodingType.Base64,
+      });
+
+      void recordSavedFile({
+        uri: outputUri,
+        fileName: convertedFileName,
+        mimeType: 'application/pdf',
+        source: 'office_export_pdf',
       });
 
       const deviceSaveResult =
@@ -2480,6 +2510,13 @@ export default function EditPdfPage() {
             const outputUri = `${Paths.document.uri}${fileName}`;
             await LegacyFileSystem.writeAsStringAsync(outputUri, convertedBase64, {
               encoding: LegacyFileSystem.EncodingType.Base64,
+            });
+
+            void recordSavedFile({
+              uri: outputUri,
+              fileName,
+              mimeType,
+              source: 'converter_export',
             });
 
             const deviceSaveResult =
@@ -3231,6 +3268,13 @@ export default function EditPdfPage() {
           pane
         );
 
+        void recordSavedFile({
+          uri: outputUri,
+          fileName,
+          mimeType: 'application/pdf',
+          source: 'annotated_pdf',
+        });
+
         const deviceSaveResult =
           Platform.OS === 'android'
             ? await savePdfToAndroidDeviceFolder(bakedPdfBase64, fileName)
@@ -3329,6 +3373,13 @@ export default function EditPdfPage() {
       if (!ok) {
         return;
       }
+
+      void recordSavedFile({
+        uri: documentUri,
+        fileName: documentName || `edited.${documentType}`,
+        mimeType: getTextMimeTypeForExtension(documentType),
+        source: 'text_document',
+      });
 
       const fileBase64 = await LegacyFileSystem.readAsStringAsync(documentUri, {
         encoding: LegacyFileSystem.EncodingType.Base64,
@@ -3518,6 +3569,14 @@ export default function EditPdfPage() {
                     : ext === 'webp'
                       ? 'image/webp'
                       : 'image/png';
+
+                void recordSavedFile({
+                  uri: outputUri,
+                  fileName,
+                  mimeType: imageMimeType,
+                  source: 'pdf_page_image',
+                });
+
                 const deviceSaveResult =
                   Platform.OS === 'android'
                     ? await saveBase64ToAndroidDeviceFolder(
