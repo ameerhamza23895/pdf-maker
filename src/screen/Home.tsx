@@ -1,13 +1,12 @@
 import type { Href } from "expo-router";
+import { useEffect, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AdBanner } from "@/src/ads/components/AdBanner";
 import { useAdsOptional } from "@/src/ads/AdsProvider";
-import type { IconSymbolName } from "@/src/components/icon-symbol";
+import { AdBanner } from "@/src/ads/components/AdBanner";
 import { HomeActionCard } from "@/src/components/home-action-card";
+import type { IconSymbolName } from "@/src/components/icon-symbol";
 import { ScreenSafeArea } from "@/src/components/ScreenSafeArea";
-import { FLOATING_TAB_BAR_PADDING } from "@/src/constants/layout";
 import { electricCuratorTheme } from "@/src/theme/electric-curator";
 
 const { colors, spacing, radius, typography } = electricCuratorTheme;
@@ -53,19 +52,40 @@ const actions: HomeAction[] = [
 
 export default function HomeScreen() {
   const ads = useAdsOptional();
-  const showBanner = ads?.preferences.bannerEnabled ?? true;
-  const insets = useSafeAreaInsets();
+  const bannerEnabled = ads?.preferences.bannerEnabled ?? false;
+  const [showBanner, setShowBanner] = useState(false);
+
+  useEffect(() => {
+    if (!bannerEnabled) {
+      setShowBanner(false);
+    }
+  }, [bannerEnabled]);
 
   return (
-    <ScreenSafeArea edges={["top", "left", "right"]} style={{ flex: 1 }}>
+    <ScreenSafeArea edges={["left", "right"]} style={{ flex: 1 }}>
+      {bannerEnabled ? (
+        <View
+          style={{
+            gap: spacing.xs,
+            height: showBanner ? undefined : 0,
+            overflow: "hidden",
+          }}
+        >
+          <AdBanner
+            visible={bannerEnabled}
+            onVisibilityChange={setShowBanner}
+          />
+        </View>
+      ) : null}
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
         style={{ flex: 1, backgroundColor: colors.surface }}
         contentContainerStyle={{
           paddingHorizontal: spacing.md,
           paddingTop: spacing.sm,
-          paddingBottom: insets.bottom + FLOATING_TAB_BAR_PADDING,
+          paddingBottom: 4,
           gap: spacing.lg,
+          // borderWidth: 2,
         }}
       >
         <View style={{ gap: spacing.xs }}>
@@ -73,7 +93,7 @@ export default function HomeScreen() {
             Quick Actions
           </Text>
           <Text selectable style={typography.headlineMd}>
-            Choose your next PDF flow.
+            Choose your next PDF flow
           </Text>
         </View>
 
@@ -104,13 +124,6 @@ export default function HomeScreen() {
             ))}
           </View>
         </View>
-
-        {showBanner ? (
-          <View style={{ gap: spacing.xs }}>
-            <Text style={typography.labelMd}>Sponsored</Text>
-            <AdBanner />
-          </View>
-        ) : null}
       </ScrollView>
     </ScreenSafeArea>
   );

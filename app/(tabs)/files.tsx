@@ -1,6 +1,6 @@
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
+import { useFocusEffect } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
-import * as Linking from "expo-linking";
 import { useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import {
@@ -13,10 +13,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { useFocusEffect } from "@react-navigation/native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { FLOATING_TAB_BAR_PADDING } from "@/src/constants/layout";
 import {
   deleteSavedFile,
   listSavedFiles,
@@ -24,7 +21,11 @@ import {
 } from "@/src/db/savedFileHistory";
 import { setPendingEditDocument } from "@/src/navigation/pendingEditDocument";
 import { electricCuratorTheme, withAlpha } from "@/src/theme/electric-curator";
-import { openSavedFileFolder } from "@/src/utils/openSavedFileLocation";
+import {
+  getLocationLabel,
+  getSavedFileFolderUri,
+  openFileWithSystemViewer,
+} from "@/src/utils/openSavedFileLocation";
 
 const { colors, spacing, radius, typography } = electricCuratorTheme;
 
@@ -45,7 +46,6 @@ function formatSavedAt(ts: number): string {
 }
 
 export default function FilesPage() {
-  const insets = useSafeAreaInsets();
   const router = useRouter();
   const [rows, setRows] = useState<SavedFileHistoryRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,19 +87,37 @@ export default function FilesPage() {
 
   const tryOpenFileExternally = useCallback(async (uri: string) => {
     try {
-      const can = await Linking.canOpenURL(uri);
-      if (can) {
-        await Linking.openURL(uri);
-        return;
-      }
+      await openFileWithSystemViewer(uri);
+      return;
     } catch {
       /* continue */
     }
+
     Alert.alert(
       "Open file",
       "This path cannot be opened with the system viewer from here. Use Edit in app instead.",
     );
   }, []);
+
+  const openFolder = useCallback(
+    (item: SavedFileHistoryRow) => {
+      const folderUri = getSavedFileFolderUri(item.uri, item.directory_uri);
+
+      if (!folderUri) {
+        Alert.alert(
+          "Open folder",
+          "We could not find the containing folder for this saved file.",
+        );
+        return;
+      }
+
+      const title = getLocationLabel(folderUri, "Folder");
+      router.push(
+        `/folder-viewer?uri=${encodeURIComponent(folderUri)}&title=${encodeURIComponent(title)}`,
+      );
+    },
+    [router],
+  );
 
   const confirmDelete = useCallback(
     (item: SavedFileHistoryRow) => {
@@ -134,10 +152,10 @@ export default function FilesPage() {
         },
         {
           text: "Open folder",
-          onPress: () => void openSavedFileFolder(item.directory_uri),
+          onPress: () => openFolder(item),
         },
         {
-          text: "Open with system…",
+          text: "Open with system...",
           onPress: () => void tryOpenFileExternally(item.uri),
         },
         {
@@ -154,7 +172,7 @@ export default function FilesPage() {
         { text: "Cancel", style: "cancel" },
       ]);
     },
-    [confirmDelete, openInEditor, tryOpenFileExternally],
+    [confirmDelete, openFolder, openInEditor, tryOpenFileExternally],
   );
 
   return (
@@ -162,18 +180,13 @@ export default function FilesPage() {
       style={[
         styles.root,
         {
-          paddingTop: insets.top + spacing.sm,
-          paddingBottom: insets.bottom + FLOATING_TAB_BAR_PADDING,
+          paddingTop: 6,
         },
       ]}
     >
       <View style={styles.headerBlock}>
         <Text style={typography.labelMd}>Save history</Text>
         <Text style={typography.headlineMd}>Recent files</Text>
-        <Text style={[typography.bodyMd, { color: ui.textMuted, marginTop: spacing.xs }]}>
-          Paths are recorded when you save or export from the editor and converter. Use Edit
-          to reopen in the app, or open the folder when Android stored a SAF location.
-        </Text>
       </View>
 
       {loading && rows.length === 0 ? (
@@ -190,12 +203,22 @@ export default function FilesPage() {
           contentContainerStyle={styles.listContent}
           ListEmptyComponent={
             <View style={styles.empty}>
-              <MaterialIcons name="folder-open" size={40} color={ui.textMuted} />
+              <MaterialIcons
+                name="folder-open"
+                size={40}
+                color={ui.textMuted}
+              />
               <Text style={[typography.titleSm, { marginTop: spacing.sm }]}>
                 Nothing saved yet
               </Text>
-              <Text style={[typography.bodyMd, { color: ui.textMuted, textAlign: "center" }]}>
-                Export or save a document from the editor — it will show up here.
+              <Text
+                style={[
+                  typography.bodyMd,
+                  { color: ui.textMuted, textAlign: "center" },
+                ]}
+              >
+                Export or save a document from the editor - it will show up
+                here.
               </Text>
             </View>
           }
@@ -205,36 +228,54 @@ export default function FilesPage() {
                 <Text style={styles.fileName} numberOfLines={2}>
                   {item.file_name}
                 </Text>
-                <Pressable
+                {/* <Pressable
                   hitSlop={12}
                   onPress={() => showRowActions(item)}
                   accessibilityLabel="More actions"
                 >
-                  <MaterialIcons name="more-horiz" size={22} color={colors.onSurface} />
-                </Pressable>
+                  <MaterialIcons
+                    name="more-horiz"
+                    size={22}
+                    color={colors.onSurface}
+                  />
+                </Pressable> */}
               </View>
               <Text style={styles.meta}>
                 {formatSavedAt(item.created_at)}
-                {item.source ? ` · ${item.source}` : ""}
+                {item.source ? ` - ${item.source}` : ""}
               </Text>
               <Text style={styles.path} numberOfLines={2} selectable>
                 {item.uri}
               </Text>
               <View style={styles.actions}>
                 <Pressable
-                  style={({ pressed }) => [styles.btnPrimary, pressed && styles.pressed]}
+                  style={({ pressed }) => [
+                    styles.btnPrimary,
+                    pressed && styles.pressed,
+                  ]}
                   onPress={() => openInEditor(item)}
                 >
-                  <MaterialIcons name="edit" size={18} color={colors.onPrimary} />
+                  <MaterialIcons
+                    name="edit"
+                    size={18}
+                    color={colors.onPrimary}
+                  />
                   <Text style={styles.btnPrimaryLabel}>Edit</Text>
                 </Pressable>
-                <Pressable
-                  style={({ pressed }) => [styles.btnGhost, pressed && styles.pressed]}
-                  onPress={() => void openSavedFileFolder(item.directory_uri)}
+                {/* <Pressable
+                  style={({ pressed }) => [
+                    styles.btnGhost,
+                    pressed && styles.pressed,
+                  ]}
+                  onPress={() => openFolder(item)}
                 >
-                  <MaterialIcons name="folder-open" size={18} color={colors.primary} />
+                  <MaterialIcons
+                    name="folder-open"
+                    size={18}
+                    color={colors.primary}
+                  />
                   <Text style={styles.btnGhostLabel}>Open folder</Text>
-                </Pressable>
+                </Pressable> */}
               </View>
             </View>
           )}

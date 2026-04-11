@@ -1,52 +1,50 @@
-import { useMemo, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useState } from "react";
+import { StyleSheet, View } from "react-native";
 
-import { StaticBannerAd } from "./StaticBannerAd";
 import { getBannerUnitIdForRuntime } from "../config/resolveAdConfig";
 import { getGoogleMobileAds } from "../googleMobileAds";
 import { electricCuratorTheme, withAlpha } from "@/src/theme/electric-curator";
 
-const { colors, radius, spacing, typography } = electricCuratorTheme;
+const { colors, radius, spacing } = electricCuratorTheme;
 const googleMobileAds = getGoogleMobileAds();
 
 type Props = {
   visible?: boolean;
+  onVisibilityChange?: (visible: boolean) => void;
 };
 
-export function AdBanner({ visible = true }: Props) {
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+export function AdBanner({
+  visible = true,
+  onVisibilityChange,
+}: Props) {
+  const [isLoaded, setIsLoaded] = useState(false);
   const unitId = useMemo(() => getBannerUnitIdForRuntime(), []);
 
-  if (!visible) {
-    return null;
-  }
+  useEffect(() => {
+    onVisibilityChange?.(visible && isLoaded);
+  }, [isLoaded, onVisibilityChange, visible]);
 
-  if (!googleMobileAds) {
-    return (
-      <View style={[styles.wrap, { padding: spacing.md }]}>
-        <Text style={styles.hint}>
-          ⚠️ AdMob native module not found. Real ads will only show in a Custom Dev Client, not inside Expo Go.
-        </Text>
-      </View>
-    );
+  useEffect(() => {
+    if (!visible) {
+      setIsLoaded(false);
+    }
+  }, [visible]);
+
+  if (!visible || !googleMobileAds) {
+    return null;
   }
 
   const { BannerAd, BannerAdSize } = googleMobileAds;
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, !isLoaded && styles.hidden]}>
       <BannerAd
         unitId={unitId}
         size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
         requestOptions={{ requestNonPersonalizedAdsOnly: true }}
-        onAdLoaded={() => setErrorMessage(null)}
-        onAdFailedToLoad={(error) => setErrorMessage(error.message)}
+        onAdLoaded={() => setIsLoaded(true)}
+        onAdFailedToLoad={() => setIsLoaded(false)}
       />
-      {errorMessage ? (
-        <Text style={styles.hint} numberOfLines={2}>
-          {errorMessage}
-        </Text>
-      ) : null}
     </View>
   );
 }
@@ -61,12 +59,11 @@ const styles = StyleSheet.create({
     borderColor: withAlpha(colors.outlineVariant, 0.5),
     backgroundColor: colors.surfaceContainerLowest,
   },
-  hint: {
-    ...typography.bodyMd,
-    paddingHorizontal: spacing.sm,
-    fontSize: 12,
-    lineHeight: 16,
-    color: withAlpha(colors.onSurface, 0.6),
-    textAlign: "center",
+  hidden: {
+    height: 0,
+    opacity: 0,
+    overflow: "hidden",
+    paddingVertical: 0,
+    borderWidth: 0,
   },
 });
