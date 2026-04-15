@@ -1289,7 +1289,9 @@ export default function EditPdfPage() {
   // not return to the intermediate image conversion screens.
   useEffect(() => {
     if (backToHome !== '1') return;
-    const unsub = navigation.addListener('beforeRemove', (e) => {
+    let unsub = () => {};
+
+    unsub = navigation.addListener('beforeRemove', (e) => {
       // Avoid infinite loops: our own redirect triggers another "beforeRemove".
       if (redirectingBackRef.current) {
         return;
@@ -1304,12 +1306,20 @@ export default function EditPdfPage() {
       redirectingBackRef.current = true;
       e.preventDefault();
 
+      // Stop intercepting after the first redirect attempt (safety in case we stay mounted).
+      unsub();
+
       // Defer to next tick so the navigation event finishes cleanly.
       setTimeout(() => {
         router.replace('/(tabs)/home');
       }, 0);
     });
-    return unsub;
+
+    return () => {
+      // Ensure we don't "trap" future back presses if the screen remains mounted.
+      redirectingBackRef.current = false;
+      unsub();
+    };
   }, [backToHome, navigation, router]);
   const [secondaryViewerInstanceId, setSecondaryViewerInstanceId] = useState(0);
   const [secondaryOfficeMeta, setSecondaryOfficeMeta] = useState({
