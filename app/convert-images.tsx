@@ -119,7 +119,10 @@ export default function ConvertImagesPage() {
         source: "images_to_pdf",
       });
       setPendingEditDocument({ uri: outputUri, name: fileName });
-      router.push("/edit-pdf");
+      router.push({
+        pathname: "/edit-pdf",
+        params: { backToHome: "1" },
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       Alert.alert(

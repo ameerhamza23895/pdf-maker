@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { electricCuratorTheme, withAlpha } from '@/src/theme/electric-curator';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import {
   ActivityIndicator,
   Alert,
@@ -1225,6 +1227,11 @@ function CustomColorModal({ visible, seedHex, title, onApply, onClose }) {
 }
 
 export default function EditPdfPage() {
+  const router = useRouter();
+  const navigation = useNavigation();
+  const { backToHome } = useLocalSearchParams();
+  const redirectingBackRef = useRef(false);
+
   const [documentUri, setDocumentUri] = useState(null);
   const [documentName, setDocumentName] = useState('');
   const [documentType, setDocumentType] = useState('');
@@ -1277,6 +1284,33 @@ export default function EditPdfPage() {
   const [secondaryViewerHtml, setSecondaryViewerHtml] = useState(null);
   const [secondaryAnnotationState, setSecondaryAnnotationState] = useState({});
   const [secondaryTotalPages, setSecondaryTotalPages] = useState(0);
+
+  // When coming from the "images -> PDF -> edit" flow, the user expects Back to exit to Home,
+  // not return to the intermediate image conversion screens.
+  useEffect(() => {
+    if (backToHome !== '1') return;
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      // Avoid infinite loops: our own redirect triggers another "beforeRemove".
+      if (redirectingBackRef.current) {
+        return;
+      }
+
+      // Only intercept actual "go back"/pop actions.
+      const t = e?.data?.action?.type;
+      if (t !== 'GO_BACK' && t !== 'POP' && t !== 'POP_TO_TOP') {
+        return;
+      }
+
+      redirectingBackRef.current = true;
+      e.preventDefault();
+
+      // Defer to next tick so the navigation event finishes cleanly.
+      setTimeout(() => {
+        router.replace('/(tabs)/home');
+      }, 0);
+    });
+    return unsub;
+  }, [backToHome, navigation, router]);
   const [secondaryViewerInstanceId, setSecondaryViewerInstanceId] = useState(0);
   const [secondaryOfficeMeta, setSecondaryOfficeMeta] = useState({
     previewKind: '',
