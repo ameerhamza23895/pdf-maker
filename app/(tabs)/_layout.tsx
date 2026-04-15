@@ -1,18 +1,32 @@
 import { Tabs } from "expo-router";
+import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
-import { Animated, Pressable, View } from "react-native";
+import {
+  Animated,
+  type GestureResponderEvent,
+  Pressable,
+  type PressableProps,
+  type PressableStateCallbackType,
+  View,
+} from "react-native";
 
+import { IS_SETTING_SHOW } from "@/ENV";
 import { IconSymbol, type IconSymbolName } from "@/src/components/icon-symbol";
 import { electricCuratorTheme } from "@/src/theme/electric-curator";
 
 const { colors, radius, spacing } = electricCuratorTheme;
 
-function TabIconWithLabel(
-  focused: boolean,
-  label: string,
-  activeIcon: IconSymbolName,
-  inactiveIcon: IconSymbolName,
-) {
+function TabIconWithLabel({
+  focused,
+  label,
+  activeIcon,
+  inactiveIcon,
+}: {
+  focused: boolean;
+  label: string;
+  activeIcon: IconSymbolName;
+  inactiveIcon: IconSymbolName;
+}) {
   const scale = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -82,41 +96,68 @@ function TabIconWithLabel(
   );
 }
 
-function AnimatedTabButton(props: any) {
+/**
+ * IMPORTANT: keep the `style` prop coming from React Navigation.
+ * Overriding it causes "ghost" tab spacing (e.g. looks like 4 slots when only 3 tabs exist).
+ */
+function AnimatedTabButton({
+  style,
+  children,
+  onPressIn,
+  onPressOut,
+  ...rest
+}: PressableProps) {
   const scale = useRef(new Animated.Value(1)).current;
 
-  const animateIn = () => {
-    Animated.spring(scale, {
-      toValue: 0.92,
-      useNativeDriver: true,
-    }).start();
+  const handlePressIn = (e: GestureResponderEvent) => {
+    Animated.spring(scale, { toValue: 0.92, useNativeDriver: true }).start();
+    onPressIn?.(e);
   };
 
-  const animateOut = () => {
-    Animated.spring(scale, {
-      toValue: 1,
-      useNativeDriver: true,
-    }).start();
+  const handlePressOut = (e: GestureResponderEvent) => {
+    Animated.spring(scale, { toValue: 1, useNativeDriver: true }).start();
+    onPressOut?.(e);
   };
 
-  const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+  const innerStyle = [
+    {
+      flex: 1,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+      width: "100%" as const,
+    },
+    { transform: [{ scale }] },
+  ];
+
+  const wrap = (node: ReactNode) => (
+    <Animated.View style={innerStyle}>{node}</Animated.View>
+  );
+
+  if (typeof children === "function") {
+    const renderChild = children as (
+      state: PressableStateCallbackType,
+    ) => ReactNode;
+    return (
+      <Pressable
+        {...rest}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        style={style}
+      >
+        {(state) => wrap(renderChild(state))}
+      </Pressable>
+    );
+  }
 
   return (
-    <AnimatedPressable
-      {...props}
-      onPressIn={animateIn}
-      onPressOut={animateOut}
-      style={[
-        {
-          flex: 1,
-          alignItems: "center",
-          justifyContent: "center",
-        },
-        { transform: [{ scale }] },
-      ]}
+    <Pressable
+      {...rest}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      style={style}
     >
-      {props.children}
-    </AnimatedPressable>
+      {wrap(children)}
+    </Pressable>
   );
 }
 
@@ -154,7 +195,8 @@ export default function TabLayout() {
 
         tabBarLabel: () => null,
 
-        tabBarButton: AnimatedTabButton,
+        // IMPORTANT: pass a component element so hooks inside are valid.
+        tabBarButton: (props) => <AnimatedTabButton {...props} />,
       }}
     >
       <Tabs.Screen
@@ -163,7 +205,14 @@ export default function TabLayout() {
           title: "Home",
           headerTitle: "Scan PDF",
           tabBarIcon: ({ focused }) =>
-            TabIconWithLabel(focused, "Home", "house.fill", "house"),
+            (
+              <TabIconWithLabel
+                focused={focused}
+                label="Home"
+                activeIcon="house.fill"
+                inactiveIcon="house"
+              />
+            ),
         }}
       />
 
@@ -172,7 +221,14 @@ export default function TabLayout() {
         options={{
           title: "Files",
           tabBarIcon: ({ focused }) =>
-            TabIconWithLabel(focused, "Files", "folder.fill", "folder"),
+            (
+              <TabIconWithLabel
+                focused={focused}
+                label="Files"
+                activeIcon="folder.fill"
+                inactiveIcon="folder"
+              />
+            ),
         }}
       />
 
@@ -181,22 +237,40 @@ export default function TabLayout() {
         options={{
           title: "Scan",
           tabBarIcon: ({ focused }) =>
-            TabIconWithLabel(focused, "Scan", "camera.fill", "camera"),
+            (
+              <TabIconWithLabel
+                focused={focused}
+                label="Scan"
+                activeIcon="camera.fill"
+                inactiveIcon="camera"
+              />
+            ),
         }}
       />
 
       <Tabs.Screen
         name="settings"
-        options={{
-          title: "Settings",
-          tabBarIcon: ({ focused }) =>
-            TabIconWithLabel(
-              focused,
-              "Settings",
-              "gearshape.fill",
-              "gearshape",
-            ),
-        }}
+        options={
+          IS_SETTING_SHOW
+            ? {
+                title: "Settings",
+                tabBarIcon: ({ focused }) =>
+                  (
+                    <TabIconWithLabel
+                      focused={focused}
+                      label="Settings"
+                      activeIcon="gearshape.fill"
+                      inactiveIcon="gearshape"
+                    />
+                  ),
+              }
+            : {
+                // Expo Router will still register the route because the file exists.
+                // This removes it from the tab bar (no slot, not clickable) while
+                // keeping it navigable via `router.push("/settings")` if needed.
+                href: null,
+              }
+        }
       />
     </Tabs>
   );
